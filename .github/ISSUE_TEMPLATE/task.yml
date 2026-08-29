@@ -1,0 +1,48 @@
+name: Engineering task
+description: 文档、配置、CI、重构或其他工程任务
+title: "[Task]: "
+labels:
+  - type:chore
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: 这项工程任务要达成什么结果？
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: 明确要修改的范围。
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: 可验证的完成条件。
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: 明确本任务不处理的内容。
+    validations:
+      required: true
+  - type: input
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: 依赖的 Issue 或 PR；没有则填 None。
+      placeholder: "None"
+    validations:
+      required: true
