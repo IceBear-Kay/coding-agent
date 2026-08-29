@@ -13,6 +13,8 @@
 
 普通任务从最新 `develop` 创建临时分支，PR 目标为 `develop`。发布通过 `develop -> main` 的 PR 完成。
 
+`main` 是仓库默认分支。由于功能 PR 合入的是 `develop`，GitHub 不会通过 `Closes #<issue>` 自动关闭 Issue。PR 合并后，应在关联 Issue 中评论对应 PR 已合入，并手动关闭该 Issue。
+
 ## Issue and PR size
 
 一个 Issue 对应一个内聚、可独立验收的能力，以及一个临时分支和一个 PR。一个 PR 内可以有多个原子 Commit 和多次 Push；不要为每个函数创建 PR，也不要把多个无关 Issue 混在一起。
@@ -30,7 +32,7 @@ git commit -m "feat(provider): implement DeepSeek provider"
 git push -u origin feature/3-deepseek-provider
 ```
 
-随后创建目标为 `develop` 的 PR，并在正文中使用 `Closes #<issue>`。
+随后创建目标为 `develop` 的 PR，并在正文中使用 `Refs #<issue>`；合并后按上面的流程手动关闭 Issue。
 
 ## Conventional Commits
 

@@ -4,7 +4,7 @@
 
 ## Related issue
 
-Closes #
+Refs #
 
 ## Changes
 
