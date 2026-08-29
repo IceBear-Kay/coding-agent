@@ -1,0 +1,52 @@
+name: Bug report
+description: 报告一个可复现的缺陷
+title: "[Bug]: "
+labels:
+  - type:bug
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: 简洁说明实际问题。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: 提供最小复现步骤、输入和环境。
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: 正确行为应该是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: 实际发生了什么？可附去除敏感信息的日志。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: 包含回归测试在内的修复完成条件。
+      placeholder: |
+        - [ ] 问题已修复
+        - [ ] 已添加回归测试
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: 本次修复不包含哪些重构或功能？

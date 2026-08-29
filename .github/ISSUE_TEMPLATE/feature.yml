@@ -1,0 +1,55 @@
+name: Feature
+description: 提议一个内聚、可独立验收的新能力
+title: "[Feature]: "
+labels:
+  - type:feature
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: 这个功能要解决什么问题？
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: 明确本次需要实现的内容。
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: 用可验证的复选项描述完成条件。
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: 明确本次不做什么，防止范围扩张。
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Test plan
+      description: 需要哪些单元、集成或端到端测试？
+    validations:
+      required: true
+  - type: input
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: 依赖的 Issue 或 PR；没有则填 None。
+      placeholder: "None"
+    validations:
+      required: true
