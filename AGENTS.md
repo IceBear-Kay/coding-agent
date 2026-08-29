@@ -8,6 +8,13 @@
 
 禁止引入 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 Agent 框架或 SDK；禁止依赖服务端托管的文件和代码执行工具。
 
+## 语言规范
+
+- Issue 正文、PR 正文、README 和公开说明文档统一使用专业、自然、成熟的中文。
+- 不要求为英文技术术语额外添加中文释义，避免写成教学材料。
+- 文件名、代码、命令、配置项、程序标识符、Commit 标题和 PR 标题继续使用英文。
+- 不要为了翻译而修改代码、配置键或 CI 检查名称。
+
 ## Working rules
 
 1. 开始任务前读取当前 Issue、相关代码和测试，不无范围扩张。
