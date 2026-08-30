@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from coding_agent import (
     ModelResponse,
     ToolCall,
     Workspace,
+    create_workspace_registry,
 )
 from coding_agent.errors import (
     ProviderAuthenticationError,
@@ -98,6 +100,40 @@ def test_agent_loop_runs_tool_then_returns_final_answer(tmp_path: Path) -> None:
     ]
     assert provider.requests[1][0] == result.state.messages[:3]
     assert provider.requests[0][0] == result.state.messages[:1]
+
+
+def test_agent_loop_round_trips_approved_file_result(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        approval_callback=lambda _: True,
+    )
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write",
+                        name="write_file",
+                        arguments={"path": "created.txt", "content": "created"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="Created the file.", finish_reason="stop"),
+        ]
+    )
+
+    result = AgentLoop(provider, workspace, registry=registry, max_steps=3).run(
+        "Create created.txt"
+    )
+
+    assert result.stop_reason == "completed"
+    assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "created"
+    tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
+    assert tool_message.tool_call_id == "call_write"
+    assert json.loads(tool_message.content)["status"] == "created"
 
 
 def test_agent_loop_stops_at_max_steps_after_executing_tool(tmp_path: Path) -> None:

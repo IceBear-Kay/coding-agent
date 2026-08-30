@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -9,6 +10,7 @@ from coding_agent.tools import (
     ListFilesArguments,
     ReadFileArguments,
     ToolDispatcher,
+    ToolOutput,
     ToolRegistrationError,
     ToolRegistry,
     ToolSpec,
@@ -109,6 +111,84 @@ def test_dispatcher_converts_handler_failure_to_tool_result() -> None:
 
     assert result.is_error is True
     assert "Tool broken failed" in result.content
+
+
+def test_dispatcher_maps_structured_success_to_json() -> None:
+    spec = ToolSpec(
+        name="structured",
+        description="Return structured output.",
+        parameters=EchoArguments,
+        handler=lambda _: ToolOutput(
+            status="created",
+            details={"path": "notes.txt", "bytes_written": 12},
+        ),
+    )
+
+    result = ToolDispatcher(ToolRegistry([spec])).dispatch(
+        ToolCall(id="call_success", name="structured", arguments={"text": "hello"})
+    )
+
+    assert result.tool_call_id == "call_success"
+    assert result.is_error is False
+    assert result.content == '{"bytes_written":12,"path":"notes.txt","status":"created"}'
+    assert json.loads(result.content) == {
+        "status": "created",
+        "path": "notes.txt",
+        "bytes_written": 12,
+    }
+
+
+@pytest.mark.parametrize("status", ["denied", "failed"])
+def test_dispatcher_maps_structured_failure_to_error_result(status: str) -> None:
+    spec = ToolSpec(
+        name="structured",
+        description="Return structured output.",
+        parameters=EchoArguments,
+        handler=lambda _: ToolOutput(
+            status=status,
+            details={"message": "Operation was not executed."},
+            is_error=True,
+        ),
+    )
+
+    result = ToolDispatcher(ToolRegistry([spec])).dispatch(
+        ToolCall(id="call_denied", name="structured", arguments={"text": "hello"})
+    )
+
+    assert result.tool_call_id == "call_denied"
+    assert result.is_error is True
+    assert json.loads(result.content) == {
+        "status": status,
+        "message": "Operation was not executed.",
+    }
+
+
+def test_dispatcher_preserves_legacy_string_output() -> None:
+    result = ToolDispatcher(ToolRegistry([make_echo_spec()])).dispatch(
+        ToolCall(id="call_legacy", name="echo", arguments={"text": "unchanged"})
+    )
+
+    assert result == ToolResult(
+        tool_call_id="call_legacy",
+        content="unchanged",
+        is_error=False,
+    )
+
+
+def test_dispatcher_does_not_format_mapping_as_python_literal() -> None:
+    spec = ToolSpec(
+        name="mapping",
+        description="Return a mapping.",
+        parameters=EchoArguments,
+        handler=lambda _: {"status": "ok", "message": "你好"},
+    )
+
+    result = ToolDispatcher(ToolRegistry([spec])).dispatch(
+        ToolCall(id="call_mapping", name="mapping", arguments={"text": "hello"})
+    )
+
+    assert result.content == '{"message":"你好","status":"ok"}'
+    assert result.is_error is False
 
 
 def test_workspace_resolves_paths_inside_root(tmp_path: Path) -> None:

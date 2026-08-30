@@ -1,3 +1,6 @@
+import json
+import sys
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -153,3 +156,293 @@ def test_cli_handles_keyboard_interrupt_during_output(tmp_path: Path) -> None:
 
     assert exit_code == 130
     assert errors == ["停止原因: interrupted"]
+
+
+def test_cli_defaults_to_read_only_tools_even_if_model_requests_write(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write",
+                        name="write_file",
+                        arguments={"path": "created.txt", "content": "content"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="Write was unavailable.", finish_reason="stop"),
+        ]
+    )
+    approval_prompts: list[str] = []
+
+    exit_code = main(
+        ["Create a file", "--workspace", str(tmp_path), "--max-steps", "3"],
+        provider=provider,
+        input_fn=lambda prompt: approval_prompts.append(prompt) or "y",
+    )
+
+    assert exit_code == 0
+    assert approval_prompts == []
+    assert not (tmp_path / "created.txt").exists()
+    assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
+        "list_files",
+        "read_file",
+    ]
+    tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
+    assert tool_message.tool_call_id == "call_write"
+    assert "Unknown tool" in tool_message.content
+
+
+def test_cli_approves_write_and_edit_as_separate_operations(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write",
+                        name="write_file",
+                        arguments={"path": "program.py", "content": "value = 1\n"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_edit",
+                        name="edit_file",
+                        arguments={
+                            "path": "program.py",
+                            "old_text": "value = 1",
+                            "new_text": "value = 2",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="文件已创建并修改。", finish_reason="stop"),
+        ]
+    )
+    answers = iter(["y", "yes"])
+    prompts: list[str] = []
+    output: list[str] = []
+
+    exit_code = main(
+        [
+            "Create and update program.py",
+            "--workspace",
+            str(tmp_path),
+            "--allow-write",
+            "--max-steps",
+            "4",
+        ],
+        provider=provider,
+        input_fn=lambda prompt: prompts.append(prompt) or next(answers),
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert prompts == ["批准本次操作？[y/N]: ", "批准本次操作？[y/N]: "]
+    assert (tmp_path / "program.py").read_text(encoding="utf-8") == "value = 2\n"
+    assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
+        "list_files",
+        "read_file",
+        "write_file",
+        "edit_file",
+    ]
+    first_tool_message = next(
+        message for message in provider.requests[1][0] if message.tool_call_id == "call_write"
+    )
+    second_tool_message = next(
+        message for message in provider.requests[2][0] if message.tool_call_id == "call_edit"
+    )
+    assert json.loads(first_tool_message.content)["status"] == "created"
+    assert json.loads(second_tool_message.content)["status"] == "edited"
+    assert any("Path: program.py" in message for message in output)
+    assert output[-1] == "文件已创建并修改。"
+
+
+def test_cli_default_input_rejects_redirected_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write",
+                        name="write_file",
+                        arguments={"path": "redirected.txt", "content": "content"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="操作未执行。", finish_reason="stop"),
+        ]
+    )
+    redirected_input = StringIO("y\n")
+    output: list[str] = []
+    monkeypatch.setattr(sys, "stdin", redirected_input)
+
+    exit_code = main(
+        ["Create redirected.txt", "--workspace", str(tmp_path), "--allow-write"],
+        provider=provider,
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert redirected_input.tell() == 0
+    assert not (tmp_path / "redirected.txt").exists()
+    assert "审批结果: 已拒绝（非交互输入不能用于审批）" in output
+    tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
+    assert json.loads(tool_message.content)["status"] == "denied"
+
+
+@pytest.mark.parametrize("answer", ["", "n"])
+def test_cli_rejected_or_empty_approval_does_not_write_file(
+    tmp_path: Path,
+    answer: str,
+) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write",
+                        name="write_file",
+                        arguments={"path": "denied.txt", "content": "content"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="操作未执行。", finish_reason="stop"),
+        ]
+    )
+
+    exit_code = main(
+        ["Create denied.txt", "--workspace", str(tmp_path), "--allow-write"],
+        provider=provider,
+        input_fn=lambda _: answer,
+    )
+
+    assert exit_code == 0
+    assert not (tmp_path / "denied.txt").exists()
+    tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
+    assert json.loads(tool_message.content)["status"] == "denied"
+
+
+def test_cli_eof_during_approval_denies_operation(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write",
+                        name="write_file",
+                        arguments={"path": "denied.txt", "content": "content"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="操作未执行。", finish_reason="stop"),
+        ]
+    )
+    output: list[str] = []
+
+    def end_input(_: str) -> str:
+        raise EOFError
+
+    exit_code = main(
+        ["Create denied.txt", "--workspace", str(tmp_path), "--allow-write"],
+        provider=provider,
+        input_fn=end_input,
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert not (tmp_path / "denied.txt").exists()
+    assert "审批结果: 已拒绝（无法读取输入）" in output
+    tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
+    assert json.loads(tool_message.content)["status"] == "denied"
+
+
+def test_cli_keyboard_interrupt_during_approval_stops_without_writing(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write",
+                        name="write_file",
+                        arguments={"path": "interrupted.txt", "content": "content"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    errors: list[str] = []
+
+    def interrupt(_: str) -> str:
+        raise KeyboardInterrupt
+
+    exit_code = main(
+        ["Create interrupted.txt", "--workspace", str(tmp_path), "--allow-write"],
+        provider=provider,
+        input_fn=interrupt,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 130
+    assert errors == ["停止原因: interrupted"]
+    assert not (tmp_path / "interrupted.txt").exists()
+    assert len(provider.requests) == 1
+
+
+def test_cli_keyboard_interrupt_during_edit_cleans_up_and_returns_130(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("before", encoding="utf-8")
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_edit",
+                        name="edit_file",
+                        arguments={
+                            "path": "notes.txt",
+                            "old_text": "before",
+                            "new_text": "after",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    errors: list[str] = []
+
+    def interrupt_fsync(_: int) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("coding_agent.file_tools.os.fsync", interrupt_fsync)
+
+    exit_code = main(
+        ["Edit notes.txt", "--workspace", str(tmp_path), "--allow-write"],
+        provider=provider,
+        input_fn=lambda _: "y",
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 130
+    assert errors == ["停止原因: interrupted"]
+    assert target.read_text(encoding="utf-8") == "before"
+    assert list(tmp_path.glob(".notes.txt.*.tmp")) == []
+    assert len(provider.requests) == 1

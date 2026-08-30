@@ -11,7 +11,16 @@ from coding_agent.agent import (
     AgentLoop,
     AgentRunResult,
 )
+from coding_agent.approval import ApprovalCallback, ApprovalRequest, request_approval
 from coding_agent.config import ProviderConfig
+from coding_agent.file_tools import (
+    DEFAULT_MAX_FILE_BYTES,
+    EditFileArguments,
+    WriteFileArguments,
+    create_workspace_registry,
+    edit_file_tool_spec,
+    write_file_tool_spec,
+)
 from coding_agent.models import (
     AgentState,
     Message,
@@ -30,6 +39,7 @@ from coding_agent.tools import (
     ListFilesArguments,
     ReadFileArguments,
     ToolDispatcher,
+    ToolOutput,
     ToolRegistrationError,
     ToolRegistry,
     ToolSpec,
@@ -45,14 +55,18 @@ from coding_agent.tools import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "ApprovalCallback",
+    "ApprovalRequest",
     "AgentState",
     "AgentLoop",
     "AgentRunResult",
     "COMPLETED_STOP_REASON",
     "DEFAULT_MAX_LIST_ENTRIES",
+    "DEFAULT_MAX_FILE_BYTES",
     "DEFAULT_MAX_OUTPUT_CHARS",
     "DEFAULT_MAX_SCAN_ENTRIES",
     "DEFAULT_MAX_STEPS",
+    "EditFileArguments",
     "FATAL_ERROR_STOP_REASON",
     "FakeProvider",
     "INTERRUPTED_STOP_REASON",
@@ -68,6 +82,7 @@ __all__ = [
     "ReadFileArguments",
     "ToolCall",
     "ToolDispatcher",
+    "ToolOutput",
     "ToolRegistrationError",
     "ToolRegistry",
     "ToolResult",
@@ -80,6 +95,11 @@ __all__ = [
     "WorkspaceFileError",
     "WorkspacePathError",
     "WorkspaceTraversalError",
+    "WriteFileArguments",
     "create_read_only_registry",
+    "create_workspace_registry",
+    "edit_file_tool_spec",
     "read_only_tool_specs",
+    "request_approval",
+    "write_file_tool_spec",
 ]
