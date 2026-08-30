@@ -1,3 +1,4 @@
+import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -16,6 +17,7 @@ from coding_agent.errors import (
 from coding_agent.models import Message, ModelResponse
 from coding_agent.provider import (
     ModelProvider,
+    OpenAICompatibleProvider,
     build_chat_completion_payload,
     parse_chat_completion_response,
     send_chat_completion_request,
@@ -324,3 +326,38 @@ def test_parse_chat_completion_response_rejects_invalid_usage() -> None:
 
     with pytest.raises(ProviderResponseError):
         parse_chat_completion_response(raw_response)
+
+
+def test_openai_compatible_provider_composes_request_and_parser() -> None:
+    request_bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Done"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(provider_config(), client)
+        response = provider.complete(
+            [Message(role="user", content="Inspect the project")],
+            [],
+        )
+
+    assert isinstance(provider, ModelProvider)
+    assert response == ModelResponse(text="Done", finish_reason="stop")
+    assert request_bodies == [
+        {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Inspect the project"}],
+            "tools": [],
+        }
+    ]

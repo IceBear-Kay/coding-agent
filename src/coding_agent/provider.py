@@ -182,3 +182,25 @@ def parse_chat_completion_response(raw_response: Any) -> ModelResponse:
         usage=usage,
         finish_reason=finish_reason,
     )
+
+
+class OpenAICompatibleProvider:
+    """Provider implementation for OpenAI-compatible chat completion APIs."""
+
+    def __init__(
+        self,
+        config: ProviderConfig,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self.config = config
+        self.client = client
+
+    def complete(
+        self,
+        messages: Sequence[Message],
+        tool_schemas: Sequence[dict[str, Any]],
+    ) -> ModelResponse:
+        """Build, send, and parse one chat completion request."""
+        payload = build_chat_completion_payload(self.config, messages, tool_schemas)
+        raw_response = send_chat_completion_request(self.config, payload, self.client)
+        return parse_chat_completion_response(raw_response)
