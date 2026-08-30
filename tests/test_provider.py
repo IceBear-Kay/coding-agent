@@ -16,6 +16,7 @@ from coding_agent.errors import (
 )
 from coding_agent.models import Message, ModelResponse
 from coding_agent.provider import (
+    FakeProvider,
     ModelProvider,
     OpenAICompatibleProvider,
     build_chat_completion_payload,
@@ -361,3 +362,59 @@ def test_openai_compatible_provider_composes_request_and_parser() -> None:
             "tools": [],
         }
     ]
+
+
+def test_fake_provider_returns_responses_in_order_and_records_requests() -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(text="First", finish_reason="stop"),
+            ModelResponse(text="Second", finish_reason="stop"),
+        ]
+    )
+    first_messages = [Message(role="user", content="First task")]
+    second_messages = [Message(role="user", content="Second task")]
+    tools = [{"type": "function", "function": {"name": "list_files"}}]
+
+    first_response = provider.complete(first_messages, tools)
+    second_response = provider.complete(second_messages, [])
+
+    assert isinstance(provider, ModelProvider)
+    assert first_response.text == "First"
+    assert second_response.text == "Second"
+    assert provider.requests == [
+        (first_messages, tools),
+        (second_messages, []),
+    ]
+
+
+def test_fake_provider_does_not_share_request_or_response_mutable_data() -> None:
+    response = ModelResponse(
+        text="Inspect",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "name": "read_file",
+                "arguments": {"path": "README.md"},
+            }
+        ],
+    )
+    provider = FakeProvider([response])
+    messages = [Message(role="user", content="Inspect")]
+    tools = [{"type": "function", "function": {"name": "read_file"}}]
+
+    returned = provider.complete(messages, tools)
+    messages[0].content = "Changed"
+    tools[0]["function"]["name"] = "changed"
+    returned.tool_calls[0].arguments["path"] = "changed"
+
+    assert provider.requests[0][0][0].content == "Inspect"
+    assert provider.requests[0][1][0]["function"]["name"] == "read_file"
+    assert response.tool_calls[0].arguments["path"] == "README.md"
+
+
+def test_fake_provider_rejects_requests_after_responses_are_exhausted() -> None:
+    provider = FakeProvider([ModelResponse(text="Done")])
+    provider.complete([], [])
+
+    with pytest.raises(ProviderResponseError, match="no remaining responses"):
+        provider.complete([], [])
