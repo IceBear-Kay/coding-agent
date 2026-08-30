@@ -1,9 +1,12 @@
 """Safe local tool definitions, registration, dispatch, and workspace paths."""
 
 import codecs
+import json
 import os
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
+from types import MappingProxyType
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -12,6 +15,7 @@ from coding_agent.models import ToolCall, ToolResult
 
 ParametersT = TypeVar("ParametersT", bound=BaseModel)
 ToolHandler = Callable[[ParametersT], Any]
+type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
 DEFAULT_MAX_OUTPUT_CHARS = 32_000
 DEFAULT_MAX_LIST_ENTRIES = 1_000
 DEFAULT_MAX_SCAN_ENTRIES = 10_000
@@ -52,6 +56,36 @@ class ToolRegistrationError(ToolError, ValueError):
 
 class UnknownToolError(ToolError, LookupError):
     """A requested tool is not present in the registry."""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutput:
+    """Structured output returned by a tool handler before dispatcher mapping."""
+
+    status: str
+    details: Mapping[str, JsonValue] = field(default_factory=dict)
+    is_error: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, str) or not self.status:
+            raise ValueError("Tool output status must not be empty")
+        if "status" in self.details:
+            raise ValueError("Tool output details must not redefine status")
+
+        details = dict(self.details)
+        json.dumps(details, ensure_ascii=False, allow_nan=False)
+        object.__setattr__(self, "details", MappingProxyType(details))
+
+    def to_json(self) -> str:
+        """Serialize content as deterministic, standards-compliant JSON."""
+        payload = {"status": self.status, **self.details}
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
 
 
 class _ScanBudget:
@@ -497,6 +531,7 @@ class ToolDispatcher:
 
         try:
             output = spec.handler(arguments)
+            content, is_error = self._format_output(output)
         except Exception as exc:  # Tool failures are data returned to the agent loop.
             return ToolResult(
                 tool_call_id=tool_call.id,
@@ -506,7 +541,8 @@ class ToolDispatcher:
 
         return ToolResult(
             tool_call_id=tool_call.id,
-            content=self._format_output(output),
+            content=content,
+            is_error=is_error,
         )
 
     def execute(self, tool_call: ToolCall) -> ToolResult:
@@ -528,9 +564,22 @@ class ToolDispatcher:
             raise ValueError(f"unexpected field(s): {names}")
 
     @staticmethod
-    def _format_output(output: Any) -> str:
+    def _format_output(output: Any) -> tuple[str, bool]:
+        if isinstance(output, ToolOutput):
+            return output.to_json(), output.is_error
         if isinstance(output, str):
-            return output
+            return output, False
         if output is None:
-            return ""
-        return str(output)
+            return "", False
+        if isinstance(output, Mapping):
+            return (
+                json.dumps(
+                    dict(output),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                False,
+            )
+        return str(output), False

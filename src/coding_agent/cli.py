@@ -7,8 +7,10 @@ from contextlib import suppress
 from typing import Any
 
 from coding_agent.agent import COMPLETED_STOP_REASON, DEFAULT_MAX_STEPS, AgentLoop, AgentRunResult
+from coding_agent.approval import ApprovalRequest
 from coding_agent.config import ProviderConfig
 from coding_agent.errors import ProviderError
+from coding_agent.file_tools import create_workspace_registry
 from coding_agent.provider import ModelProvider, OpenAICompatibleProvider
 from coding_agent.tools import Workspace
 
@@ -27,7 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the parser separately so help and argument behavior are testable."""
     parser = argparse.ArgumentParser(
         prog="coding-agent",
-        description="在工作区运行一次只读 coding-agent 任务。",
+        description="在工作区运行一次 coding-agent 任务。",
     )
     parser.add_argument(
         "task",
@@ -39,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
         "-w",
         default=".",
         help="工作区目录（默认：当前目录）。",
+    )
+    parser.add_argument(
+        "--allow-write",
+        action="store_true",
+        help="允许模型申请创建或精确修改文件；每次操作仍需确认。",
     )
     parser.add_argument(
         "--max-steps",
@@ -91,6 +98,23 @@ def _report_interrupt(error_fn: Callable[[str], Any]) -> None:
         error_fn("停止原因: interrupted")
 
 
+def _prompt_for_approval(
+    request: ApprovalRequest,
+    input_fn: Callable[[str], str],
+    output_fn: Callable[[str], Any],
+) -> bool:
+    output_fn(f"待审批操作: {request.operation}\n{request.preview}")
+    try:
+        answer = input_fn("批准本次操作？[y/N]: ")
+    except EOFError:
+        output_fn("审批结果: 已拒绝（无法读取输入）")
+        return False
+
+    approved = answer.strip().casefold() in {"y", "yes"}
+    output_fn("审批结果: 已批准" if approved else "审批结果: 已拒绝")
+    return approved
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -116,10 +140,24 @@ def main(
             return 2
 
         workspace = Workspace(args.workspace)
+
+        def approve_operation(request: ApprovalRequest) -> bool:
+            return _prompt_for_approval(
+                request,
+                input_fn,
+                output_fn,
+            )
+
+        registry = create_workspace_registry(
+            workspace,
+            allow_write=args.allow_write,
+            approval_callback=approve_operation if args.allow_write else None,
+        )
         selected_provider = provider if provider is not None else _default_provider()
         result = AgentLoop(
             selected_provider,
             workspace,
+            registry=registry,
             max_steps=args.max_steps,
             max_retries=args.max_retries,
         ).run(task)
