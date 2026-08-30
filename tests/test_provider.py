@@ -17,6 +17,7 @@ from coding_agent.models import Message, ModelResponse
 from coding_agent.provider import (
     ModelProvider,
     build_chat_completion_payload,
+    parse_chat_completion_response,
     send_chat_completion_request,
 )
 
@@ -188,3 +189,138 @@ def test_send_chat_completion_request_rejects_unexpected_success_body(body: Any)
         pytest.raises(ProviderResponseError),
     ):
         send_chat_completion_request(provider_config(), {}, client)
+
+
+def test_parse_chat_completion_response_reads_text_usage_and_finish_reason() -> None:
+    response = parse_chat_completion_response(
+        {
+            "choices": [
+                {
+                    "message": {"role": "assistant", "content": "Done"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 3,
+                "total_tokens": 15,
+            },
+        }
+    )
+
+    assert response.text == "Done"
+    assert response.tool_calls == []
+    assert response.finish_reason == "stop"
+    assert response.usage is not None
+    assert response.usage.model_dump() == {
+        "input_tokens": 12,
+        "output_tokens": 3,
+        "total_tokens": 15,
+    }
+
+
+def test_parse_chat_completion_response_decodes_tool_call_arguments() -> None:
+    response = parse_chat_completion_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": '{"path":"README.md"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+    )
+
+    assert response.text is None
+    assert response.tool_calls[0].id == "call_1"
+    assert response.tool_calls[0].name == "read_file"
+    assert response.tool_calls[0].arguments == {"path": "README.md"}
+
+
+def test_parse_chat_completion_response_preserves_multiple_tool_calls() -> None:
+    raw_tool_calls = [
+        {
+            "id": "call_1",
+            "function": {"name": "list_files", "arguments": '{"path":"."}'},
+        },
+        {
+            "id": "call_2",
+            "function": {"name": "read_file", "arguments": '{"path":"README.md"}'},
+        },
+    ]
+
+    response = parse_chat_completion_response(
+        {
+            "choices": [
+                {
+                    "message": {"content": None, "tool_calls": raw_tool_calls},
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+    )
+
+    assert [call.id for call in response.tool_calls] == ["call_1", "call_2"]
+
+
+@pytest.mark.parametrize(
+    "raw_response",
+    [
+        {},
+        {"choices": []},
+        {"choices": [{}]},
+    ],
+)
+def test_parse_chat_completion_response_rejects_missing_required_structure(
+    raw_response: dict[str, Any],
+) -> None:
+    with pytest.raises(ProviderResponseError):
+        parse_chat_completion_response(raw_response)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ["not-json", "[]", "null"],
+)
+def test_parse_chat_completion_response_rejects_invalid_tool_arguments(arguments: str) -> None:
+    raw_response = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "function": {"name": "read_file", "arguments": arguments},
+                        }
+                    ],
+                }
+            }
+        ]
+    }
+
+    with pytest.raises(ProviderResponseError):
+        parse_chat_completion_response(raw_response)
+
+
+def test_parse_chat_completion_response_rejects_invalid_usage() -> None:
+    raw_response = {
+        "choices": [{"message": {"content": "Done"}}],
+        "usage": {"prompt_tokens": -1, "completion_tokens": 3, "total_tokens": 2},
+    }
+
+    with pytest.raises(ProviderResponseError):
+        parse_chat_completion_response(raw_response)
