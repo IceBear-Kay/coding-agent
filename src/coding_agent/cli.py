@@ -3,6 +3,7 @@
 import argparse
 import sys
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from typing import Any
 
 from coding_agent.agent import COMPLETED_STOP_REASON, DEFAULT_MAX_STEPS, AgentLoop, AgentRunResult
@@ -79,9 +80,15 @@ def _report_result(
     if result.stop_reason == COMPLETED_STOP_REASON:
         return 0
 
-    detail = f"：{result.error}" if result.error is not None else ""
+    error_text = str(result.error) if result.error is not None else ""
+    detail = f"：{error_text}" if error_text else ""
     error_fn(f"停止原因: {result.stop_reason}{detail}")
     return 130 if result.stop_reason == "interrupted" else 1
+
+
+def _report_interrupt(error_fn: Callable[[str], Any]) -> None:
+    with suppress(KeyboardInterrupt):
+        error_fn("停止原因: interrupted")
 
 
 def main(
@@ -97,21 +104,17 @@ def main(
     ``provider`` is injectable for offline tests; normal CLI use creates the configured
     OpenAI-compatible provider from the environment.
     """
-    args = build_parser().parse_args(argv)
     report_error = error_fn or (lambda message: print(message, file=sys.stderr))
 
-    task = args.task
-    if task is None:
-        try:
-            task = input_fn("任务: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            report_error("停止原因: interrupted")
-            return 130
-    if not task:
-        report_error("错误: task 不能为空")
-        return 2
-
     try:
+        args = build_parser().parse_args(argv)
+        task = args.task
+        if task is None:
+            task = input_fn("任务: ").strip()
+        if not task:
+            report_error("错误: task 不能为空")
+            return 2
+
         workspace = Workspace(args.workspace)
         selected_provider = provider if provider is not None else _default_provider()
         result = AgentLoop(
@@ -120,11 +123,16 @@ def main(
             max_steps=args.max_steps,
             max_retries=args.max_retries,
         ).run(task)
+        return _report_result(result, output_fn, report_error)
+    except KeyboardInterrupt:
+        _report_interrupt(report_error)
+        return 130
+    except EOFError:
+        report_error("错误: 无法读取 task")
+        return 2
     except (ProviderError, OSError, ValueError) as exc:
         report_error(f"错误: {exc}")
         return 2
-
-    return _report_result(result, output_fn, report_error)
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through the console script.

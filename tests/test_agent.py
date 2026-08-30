@@ -285,3 +285,45 @@ def test_agent_loop_preserves_non_normal_finish_reason(finish_reason: str, tmp_p
     assert result.answer is None
     assert result.stop_reason == finish_reason
     assert result.stop_reason != "completed"
+
+
+@pytest.mark.parametrize(
+    "finish_reason", ["length", "content_filter", "insufficient_system_resource"]
+)
+def test_agent_loop_does_not_dispatch_tools_for_non_normal_finish_reason(
+    finish_reason: str,
+    tmp_path: Path,
+) -> None:
+    class RecordingDispatcher:
+        def __init__(self) -> None:
+            self.calls: list[ToolCall] = []
+
+        def dispatch(self, tool_call: ToolCall) -> None:
+            self.calls.append(tool_call)
+
+    dispatcher = RecordingDispatcher()
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                text=None,
+                reasoning_content="The response was cut off.",
+                tool_calls=[
+                    ToolCall(
+                        id="call_should_not_run",
+                        name="list_files",
+                        arguments={},
+                    )
+                ],
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+    loop = AgentLoop(provider, Workspace(tmp_path), dispatcher=dispatcher, max_steps=3)
+
+    result = loop.run("Inspect files.")
+
+    assert result.stop_reason == finish_reason
+    assert result.state.messages[-1].role == "assistant"
+    assert result.state.messages[-1].tool_calls[0].id == "call_should_not_run"
+    assert not dispatcher.calls
+    assert len(provider.requests) == 1

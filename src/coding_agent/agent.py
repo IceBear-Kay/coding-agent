@@ -120,6 +120,10 @@ class AgentLoop:
                 retry_count = 0
                 self._append_assistant_message(state, response)
 
+                if response.finish_reason in NON_NORMAL_FINISH_REASONS:
+                    state.stop_reason = response.finish_reason
+                    return AgentRunResult(answer=response.text, state=state)
+
                 if not response.tool_calls:
                     state.stop_reason = self._finish_stop_reason(response)
                     return AgentRunResult(answer=response.text, state=state)
@@ -133,10 +137,6 @@ class AgentLoop:
                             content=tool_result.content,
                         )
                     )
-
-                if response.finish_reason in NON_NORMAL_FINISH_REASONS:
-                    state.stop_reason = response.finish_reason
-                    return AgentRunResult(answer=response.text, state=state)
 
                 if state.step_count >= state.max_steps:
                     state.stop_reason = MAX_STEPS_STOP_REASON

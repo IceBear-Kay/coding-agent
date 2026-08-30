@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from coding_agent.cli import main
 from coding_agent.models import ModelResponse, ToolCall
 from coding_agent.provider import FakeProvider
@@ -95,3 +97,59 @@ def test_cli_rejects_empty_interactive_task(tmp_path: Path) -> None:
 
     assert exit_code == 2
     assert errors == ["错误: task 不能为空"]
+
+
+def test_cli_handles_keyboard_interrupt_during_input(tmp_path: Path) -> None:
+    errors: list[str] = []
+
+    def interrupt(_: str) -> str:
+        raise KeyboardInterrupt
+
+    exit_code = main(
+        ["--workspace", str(tmp_path)],
+        provider=FakeProvider([]),
+        input_fn=interrupt,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 130
+    assert errors == ["停止原因: interrupted"]
+
+
+def test_cli_handles_keyboard_interrupt_during_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors: list[str] = []
+
+    def interrupt_workspace(_: str | Path) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("coding_agent.cli.Workspace", interrupt_workspace)
+
+    exit_code = main(
+        ["Inspect files", "--workspace", str(tmp_path)],
+        provider=FakeProvider([]),
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 130
+    assert errors == ["停止原因: interrupted"]
+
+
+def test_cli_handles_keyboard_interrupt_during_output(tmp_path: Path) -> None:
+    provider = FakeProvider([ModelResponse(text="Done", finish_reason="stop")])
+    errors: list[str] = []
+
+    def interrupt_output(_: str) -> None:
+        raise KeyboardInterrupt
+
+    exit_code = main(
+        ["Finish the task", "--workspace", str(tmp_path)],
+        provider=provider,
+        output_fn=interrupt_output,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 130
+    assert errors == ["停止原因: interrupted"]
