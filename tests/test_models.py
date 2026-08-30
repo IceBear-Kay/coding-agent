@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from coding_agent.models import Message, ModelResponse, ToolCall, Usage
+from coding_agent.models import Message, ModelResponse, ToolCall, ToolResult, Usage
 
 
 @pytest.mark.parametrize("role", ["system", "user", "assistant"])
@@ -106,6 +106,42 @@ def test_tool_call_requires_object_arguments() -> None:
         ToolCall.model_validate({"id": "call_1", "name": "read_file", "arguments": "{}"})
 
     assert exc_info.value.errors()[0]["loc"] == ("arguments",)
+
+
+def test_tool_result_defaults_to_success() -> None:
+    result = ToolResult(tool_call_id="call_1", content="File contents")
+
+    assert result.model_dump() == {
+        "tool_call_id": "call_1",
+        "content": "File contents",
+        "is_error": False,
+    }
+
+
+def test_tool_result_represents_an_error() -> None:
+    result = ToolResult(
+        tool_call_id="call_1",
+        content="File not found",
+        is_error=True,
+    )
+
+    assert result.tool_call_id == "call_1"
+    assert result.content == "File not found"
+    assert result.is_error is True
+
+
+def test_tool_result_rejects_empty_call_id() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ToolResult(tool_call_id="", content="File contents")
+
+    assert exc_info.value.errors()[0]["loc"] == ("tool_call_id",)
+
+
+def test_tool_result_requires_content() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        ToolResult.model_validate({"tool_call_id": "call_1"})
+
+    assert exc_info.value.errors()[0]["loc"] == ("content",)
 
 
 def test_usage_rejects_negative_token_counts() -> None:

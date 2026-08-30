@@ -22,6 +22,14 @@ class ToolCall(BaseModel):
     arguments: dict[str, Any]
 
 
+class ToolResult(BaseModel):
+    """The output produced for a specific tool invocation."""
+
+    tool_call_id: str = Field(min_length=1)
+    content: str
+    is_error: bool = False
+
+
 class Usage(BaseModel):
     """Token counts reported for one model response."""
 
