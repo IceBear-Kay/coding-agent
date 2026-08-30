@@ -1,9 +1,10 @@
+import os
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from coding_agent.models import ToolCall
+from coding_agent.models import ToolCall, ToolResult
 from coding_agent.tools import (
     ListFilesArguments,
     ReadFileArguments,
@@ -140,6 +141,98 @@ def test_list_files_marks_output_when_entry_limit_is_reached(tmp_path: Path) -> 
     assert result == "a.txt\nb.txt\n...[file list truncated]"
 
 
+def test_list_files_stops_descending_after_budget_is_exceeded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "a"
+    first.mkdir()
+    for name in ["one.txt", "two.txt", "three.txt"]:
+        (first / name).write_text(name, encoding="utf-8")
+    later = tmp_path / "z"
+    later.mkdir()
+    (later / "later.txt").write_text("later", encoding="utf-8")
+
+    original_scandir = os.scandir
+    scanned_directories: list[str] = []
+    scanned_entries = 0
+
+    class TrackingScanner:
+        def __init__(self, path: str | os.PathLike[str]):
+            self.scanner = original_scandir(path)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal scanned_entries
+            entry = next(self.scanner)
+            scanned_entries += 1
+            return entry
+
+        def close(self):
+            self.scanner.close()
+
+    def tracking_scandir(path: str | os.PathLike[str]):
+        scanned_directories.append(Path(path).relative_to(tmp_path).as_posix() or ".")
+        return TrackingScanner(path)
+
+    monkeypatch.setattr(os, "scandir", tracking_scandir)
+    result = Workspace(tmp_path).list_files(max_entries=1)
+
+    assert result == "a/one.txt\n...[file list truncated]"
+    assert scanned_directories == [".", "a"]
+    assert scanned_entries == 3
+
+
+def test_list_files_skips_directory_symlink_escape(tmp_path: Path) -> None:
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    link = tmp_path / "linked"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+
+    assert "secret.txt" not in Workspace(tmp_path).list_files()
+
+
+def test_list_files_skips_reparse_directory_before_descending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    linked = tmp_path / "junction"
+    linked.mkdir()
+    (linked / "should-not-list.txt").write_text("hidden", encoding="utf-8")
+
+    monkeypatch.setattr(
+        Workspace,
+        "_is_reparse_point",
+        staticmethod(lambda path: path.name == "junction"),
+    )
+
+    assert "should-not-list.txt" not in Workspace(tmp_path).list_files()
+
+
+def test_list_files_permission_failure_is_structured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied_scandir(_: str | os.PathLike[str]):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(os, "scandir", denied_scandir)
+    result = ToolDispatcher(create_read_only_registry(Workspace(tmp_path))).dispatch(
+        ToolCall(id="call_1", name="list_files", arguments={})
+    )
+
+    assert isinstance(result, ToolResult)
+    assert result.tool_call_id == "call_1"
+    assert result.is_error is True
+    assert "Permission denied" in result.content
+
+
 def test_read_file_reads_utf8_text(tmp_path: Path) -> None:
     target = tmp_path / "notes.txt"
     target.write_text("你好，workspace", encoding="utf-8")
@@ -153,6 +246,50 @@ def test_read_file_marks_output_when_character_limit_is_reached(tmp_path: Path) 
     assert Workspace(tmp_path).read_file("long.txt", max_output_chars=5) == (
         "01234\n...[output truncated]"
     )
+
+
+def test_read_file_reads_only_a_bounded_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = "x" * 100_000
+    (tmp_path / "large.txt").write_text(content, encoding="utf-8")
+    original_open = Path.open
+    bytes_read = 0
+
+    class TrackingFile:
+        def __init__(self, file_handle):
+            self.file_handle = file_handle
+
+        def __enter__(self):
+            self.file_handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file_handle.__exit__(*args)
+
+        def read(self, size: int = -1):
+            nonlocal bytes_read
+            chunk = self.file_handle.read(size)
+            bytes_read += len(chunk)
+            return chunk
+
+    def tracking_open(path: Path, *args, **kwargs):
+        return TrackingFile(original_open(path, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "open", tracking_open)
+    result = Workspace(tmp_path).read_file("large.txt", max_output_chars=10)
+
+    assert result == "xxxxxxxxxx\n...[output truncated]"
+    assert bytes_read < len(content)
+
+
+def test_read_file_preserves_utf8_character_boundaries(tmp_path: Path) -> None:
+    (tmp_path / "unicode.txt").write_text("你好世界", encoding="utf-8")
+
+    result = Workspace(tmp_path).read_file("unicode.txt", max_output_chars=3)
+
+    assert result == "你好世\n...[output truncated]"
 
 
 @pytest.mark.parametrize(

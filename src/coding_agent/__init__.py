@@ -25,6 +25,7 @@ from coding_agent.tools import (
     Workspace,
     WorkspaceFileError,
     WorkspacePathError,
+    WorkspaceTraversalError,
     create_read_only_registry,
     read_only_tool_specs,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "Workspace",
     "WorkspaceFileError",
     "WorkspacePathError",
+    "WorkspaceTraversalError",
     "create_read_only_registry",
     "read_only_tool_specs",
 ]

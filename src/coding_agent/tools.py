@@ -1,5 +1,6 @@
 """Safe local tool definitions, registration, dispatch, and workspace paths."""
 
+import codecs
 import os
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path, PureWindowsPath
@@ -13,6 +14,7 @@ ParametersT = TypeVar("ParametersT", bound=BaseModel)
 ToolHandler = Callable[[ParametersT], Any]
 DEFAULT_MAX_OUTPUT_CHARS = 32_000
 DEFAULT_MAX_LIST_ENTRIES = 1_000
+READ_CHUNK_SIZE = 8_192
 TRUNCATION_MARKER = "\n...[output truncated]"
 LIST_TRUNCATION_MARKER = "\n...[file list truncated]"
 IGNORED_DIRECTORY_NAMES = frozenset(
@@ -37,6 +39,10 @@ class WorkspacePathError(ToolError, ValueError):
 
 class WorkspaceFileError(ToolError):
     """The requested workspace file cannot be read as UTF-8 text."""
+
+
+class WorkspaceTraversalError(ToolError):
+    """The workspace could not be traversed safely."""
 
 
 class ToolRegistrationError(ToolError, ValueError):
@@ -101,26 +107,101 @@ class Workspace:
         if not directory.is_dir():
             raise NotADirectoryError(f"Workspace path is not a directory: {path}")
 
-        file_paths: list[str] = []
-        for current_root, directory_names, file_names in os.walk(directory, followlinks=False):
-            directory_names[:] = sorted(
-                name for name in directory_names if name not in IGNORED_DIRECTORY_NAMES
-            )
-            for file_name in sorted(file_names):
-                file_path = Path(current_root) / file_name
-                if file_path.is_symlink():
-                    try:
-                        self.resolve_path(file_path.relative_to(self.root))
-                    except WorkspacePathError:
-                        continue
-                relative_path = file_path.relative_to(self.root).as_posix()
-                file_paths.append(relative_path)
-
-        file_paths = sorted(file_paths)
-        result = "\n".join(file_paths[:max_entries])
-        if len(file_paths) > max_entries:
+        file_paths, truncated = self._collect_file_paths(directory, max_entries)
+        result = "\n".join(file_paths)
+        if truncated:
             result += LIST_TRUNCATION_MARKER
         return result
+
+    def _collect_file_paths(self, directory: Path, max_entries: int) -> tuple[list[str], bool]:
+        """Traverse only until one extra file proves that the result is truncated."""
+        file_paths: list[str] = []
+        truncated = False
+
+        def visit(current_directory: Path) -> None:
+            nonlocal truncated
+            try:
+                scanner = os.scandir(current_directory)
+            except PermissionError as exc:
+                raise WorkspaceTraversalError(
+                    f"Permission denied while scanning workspace directory: {current_directory}"
+                ) from exc
+            except OSError as exc:
+                raise WorkspaceTraversalError(
+                    f"Unable to scan workspace directory: {current_directory}"
+                ) from exc
+
+            try:
+                for entry in scanner:
+                    if truncated:
+                        return
+                    entry_path = Path(entry.path)
+                    if entry.name.casefold() in IGNORED_DIRECTORY_NAMES:
+                        continue
+
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if self._is_reparse_point(entry_path):
+                                continue
+                            self._ensure_inside_workspace(entry_path)
+                            visit(entry_path)
+                            if truncated:
+                                return
+                        elif entry.is_file(follow_symlinks=False):
+                            if self._is_reparse_point(entry_path):
+                                continue
+                            self._ensure_inside_workspace(entry_path)
+                            file_paths.append(entry_path.relative_to(self.root).as_posix())
+                            if len(file_paths) > max_entries:
+                                truncated = True
+                                return
+                    except PermissionError as exc:
+                        raise WorkspaceTraversalError(
+                            f"Permission denied while inspecting workspace path: {entry_path}"
+                        ) from exc
+                    except OSError as exc:
+                        raise WorkspaceTraversalError(
+                            f"Unable to inspect workspace path: {entry_path}"
+                        ) from exc
+            except PermissionError as exc:
+                raise WorkspaceTraversalError(
+                    f"Permission denied while scanning workspace directory: {current_directory}"
+                ) from exc
+            except OSError as exc:
+                raise WorkspaceTraversalError(
+                    f"Unable to scan workspace directory: {current_directory}"
+                ) from exc
+            finally:
+                scanner.close()
+
+        visit(directory)
+        return sorted(file_paths[:max_entries]), truncated
+
+    def _ensure_inside_workspace(self, path: Path) -> None:
+        try:
+            path.resolve(strict=False).relative_to(self.root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise WorkspacePathError("Workspace path escapes the workspace root") from exc
+
+    @staticmethod
+    def _is_reparse_point(path: Path) -> bool:
+        """Identify links and Windows reparse points before descending."""
+        if path.is_symlink():
+            return True
+
+        is_junction = getattr(path, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            return True
+
+        try:
+            stat_result = path.stat(follow_symlinks=False)
+        except PermissionError as exc:
+            raise WorkspaceTraversalError(
+                f"Permission denied while inspecting workspace path: {path}"
+            ) from exc
+        except OSError:
+            return False
+        return bool(getattr(stat_result, "st_reparse_tag", 0))
 
     def read_file(
         self,
@@ -138,17 +219,52 @@ class Workspace:
         if not file_path.is_file():
             raise IsADirectoryError(f"Workspace path is not a file: {path}")
 
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        content_parts: list[str] = []
+        character_count = 0
+        truncated = False
+        read_size = min(READ_CHUNK_SIZE, max(4, (max_output_chars + 1) * 4))
+
         try:
-            raw_content = file_path.read_bytes()
+            with file_path.open("rb") as file_handle:
+                while character_count <= max_output_chars:
+                    chunk = file_handle.read(read_size)
+                    if not chunk:
+                        break
+                    if b"\x00" in chunk:
+                        raise WorkspaceFileError(
+                            "Workspace file appears to be binary; UTF-8 text required"
+                        )
+                    try:
+                        decoded = decoder.decode(chunk, final=False)
+                    except UnicodeDecodeError as exc:
+                        raise WorkspaceFileError("Workspace file is not valid UTF-8 text") from exc
+
+                    remaining = max_output_chars + 1 - character_count
+                    if len(decoded) >= remaining:
+                        content_parts.append(decoded[:remaining])
+                        truncated = True
+                        break
+                    content_parts.append(decoded)
+                    character_count += len(decoded)
+
+                if not truncated:
+                    try:
+                        decoded = decoder.decode(b"", final=True)
+                    except UnicodeDecodeError as exc:
+                        raise WorkspaceFileError("Workspace file is not valid UTF-8 text") from exc
+                    content_parts.append(decoded)
+        except WorkspaceFileError:
+            raise
+        except PermissionError as exc:
+            raise WorkspaceFileError(
+                f"Permission denied while reading workspace file: {path}"
+            ) from exc
         except OSError as exc:
             raise WorkspaceFileError(f"Unable to read workspace file: {path}") from exc
-        if b"\x00" in raw_content:
-            raise WorkspaceFileError("Workspace file appears to be binary; UTF-8 text required")
-        try:
-            content = raw_content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise WorkspaceFileError("Workspace file is not valid UTF-8 text") from exc
-        if len(content) > max_output_chars:
+
+        content = "".join(content_parts)
+        if truncated:
             return content[:max_output_chars] + TRUNCATION_MARKER
         return content
 
