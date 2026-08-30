@@ -1,0 +1,131 @@
+"""Command-line entry point for one coding-agent task."""
+
+import argparse
+import sys
+from collections.abc import Callable, Sequence
+from typing import Any
+
+from coding_agent.agent import COMPLETED_STOP_REASON, DEFAULT_MAX_STEPS, AgentLoop, AgentRunResult
+from coding_agent.config import ProviderConfig
+from coding_agent.errors import ProviderError
+from coding_agent.provider import ModelProvider, OpenAICompatibleProvider
+from coding_agent.tools import Workspace
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是正整数") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("必须是正整数")
+    return parsed
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the parser separately so help and argument behavior are testable."""
+    parser = argparse.ArgumentParser(
+        prog="coding-agent",
+        description="在工作区运行一次只读 coding-agent 任务。",
+    )
+    parser.add_argument(
+        "task",
+        nargs="?",
+        help="发送给 agent 的任务；省略后将交互式输入。",
+    )
+    parser.add_argument(
+        "--workspace",
+        "-w",
+        default=".",
+        help="工作区目录（默认：当前目录）。",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=_positive_int,
+        default=DEFAULT_MAX_STEPS,
+        help=f"Provider 最大调用次数（包括重试，默认：{DEFAULT_MAX_STEPS}）。",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=_non_negative_int,
+        default=2,
+        help="临时 Provider 错误的最大重试次数（默认：2）。",
+    )
+    return parser
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("必须是非负整数") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("必须是非负整数")
+    return parsed
+
+
+def _default_provider() -> ModelProvider:
+    return OpenAICompatibleProvider(ProviderConfig.from_env())
+
+
+def _report_result(
+    result: AgentRunResult,
+    output_fn: Callable[[str], Any],
+    error_fn: Callable[[str], Any],
+) -> int:
+    if result.answer is not None:
+        output_fn(result.answer)
+
+    if result.stop_reason == COMPLETED_STOP_REASON:
+        return 0
+
+    detail = f"：{result.error}" if result.error is not None else ""
+    error_fn(f"停止原因: {result.stop_reason}{detail}")
+    return 130 if result.stop_reason == "interrupted" else 1
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    provider: ModelProvider | None = None,
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], Any] = print,
+    error_fn: Callable[[str], Any] | None = None,
+) -> int:
+    """Run one task and return a process-style exit code.
+
+    ``provider`` is injectable for offline tests; normal CLI use creates the configured
+    OpenAI-compatible provider from the environment.
+    """
+    args = build_parser().parse_args(argv)
+    report_error = error_fn or (lambda message: print(message, file=sys.stderr))
+
+    task = args.task
+    if task is None:
+        try:
+            task = input_fn("任务: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            report_error("停止原因: interrupted")
+            return 130
+    if not task:
+        report_error("错误: task 不能为空")
+        return 2
+
+    try:
+        workspace = Workspace(args.workspace)
+        selected_provider = provider if provider is not None else _default_provider()
+        result = AgentLoop(
+            selected_provider,
+            workspace,
+            max_steps=args.max_steps,
+            max_retries=args.max_retries,
+        ).run(task)
+    except (ProviderError, OSError, ValueError) as exc:
+        report_error(f"错误: {exc}")
+        return 2
+
+    return _report_result(result, output_fn, report_error)
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through the console script.
+    raise SystemExit(main())

@@ -1,5 +1,16 @@
 """Core package for the coding agent."""
 
+from coding_agent.agent import (
+    COMPLETED_STOP_REASON,
+    DEFAULT_MAX_STEPS,
+    FATAL_ERROR_STOP_REASON,
+    INTERRUPTED_STOP_REASON,
+    MAX_STEPS_STOP_REASON,
+    PROVIDER_ERROR_STOP_REASON,
+    TRANSIENT_PROVIDER_ERROR_STOP_REASON,
+    AgentLoop,
+    AgentRunResult,
+)
 from coding_agent.config import ProviderConfig
 from coding_agent.models import (
     AgentState,
@@ -35,17 +46,25 @@ __version__ = "0.1.0"
 
 __all__ = [
     "AgentState",
+    "AgentLoop",
+    "AgentRunResult",
+    "COMPLETED_STOP_REASON",
     "DEFAULT_MAX_LIST_ENTRIES",
     "DEFAULT_MAX_OUTPUT_CHARS",
     "DEFAULT_MAX_SCAN_ENTRIES",
+    "DEFAULT_MAX_STEPS",
+    "FATAL_ERROR_STOP_REASON",
     "FakeProvider",
+    "INTERRUPTED_STOP_REASON",
     "ListFilesArguments",
     "LIST_TRUNCATION_MARKER",
+    "MAX_STEPS_STOP_REASON",
     "Message",
     "ModelProvider",
     "ModelResponse",
     "OpenAICompatibleProvider",
     "ProviderConfig",
+    "PROVIDER_ERROR_STOP_REASON",
     "ReadFileArguments",
     "ToolCall",
     "ToolDispatcher",
@@ -54,6 +73,7 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "TRUNCATION_MARKER",
+    "TRANSIENT_PROVIDER_ERROR_STOP_REASON",
     "Usage",
     "UnknownToolError",
     "Workspace",

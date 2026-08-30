@@ -12,6 +12,9 @@ dependencies = [
     "pydantic>=2.10,<3",
 ]
 
+[project.scripts]
+coding-agent = "coding_agent.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3,<9",

@@ -56,6 +56,13 @@ Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数�
 
 只读 M2 用于尽早验证完整数据流，但最终 Coding Agent 必须具备本地写入、修改和命令执行能力。
 
+## v0.1.0 当前能力与限制
+
+- CLI 可以接收一次任务和工作区，驱动 Provider、Agent Loop 与本地工具完成只读分析。
+- 当前公开工具只有 `list_files` 和 `read_file`；路径必须位于工作区，目录扫描和文件输出均有预算。
+- Agent Loop 会保留完整对话历史、Assistant Tool Calls、`reasoning_content` 和原始 `tool_call_id`，并区分正常完成、`max_steps`、`interrupted`、Provider 错误及非正常 `finish_reason`。
+- 当前不写入或修改文件，不执行本地命令，不提供持久化会话或上下文压缩；这些能力属于后续版本。
+
 ## Safety
 
 - 所有路径解析后必须位于指定工作区。
