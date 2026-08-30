@@ -14,6 +14,7 @@ ParametersT = TypeVar("ParametersT", bound=BaseModel)
 ToolHandler = Callable[[ParametersT], Any]
 DEFAULT_MAX_OUTPUT_CHARS = 32_000
 DEFAULT_MAX_LIST_ENTRIES = 1_000
+DEFAULT_MAX_SCAN_ENTRIES = 10_000
 READ_CHUNK_SIZE = 8_192
 TRUNCATION_MARKER = "\n...[output truncated]"
 LIST_TRUNCATION_MARKER = "\n...[file list truncated]"
@@ -51,6 +52,21 @@ class ToolRegistrationError(ToolError, ValueError):
 
 class UnknownToolError(ToolError, LookupError):
     """A requested tool is not present in the registry."""
+
+
+class _ScanBudget:
+    """Shared counter for directory accesses and entries inspected."""
+
+    def __init__(self, limit: int) -> None:
+        self.remaining = limit
+        self.exhausted = False
+
+    def consume(self) -> bool:
+        if self.remaining <= 0:
+            self.exhausted = True
+            return False
+        self.remaining -= 1
+        return True
 
 
 class Workspace:
@@ -96,10 +112,13 @@ class Workspace:
         path: str | Path = ".",
         *,
         max_entries: int = DEFAULT_MAX_LIST_ENTRIES,
+        max_scan_entries: int = DEFAULT_MAX_SCAN_ENTRIES,
     ) -> str:
         """Return workspace-relative file paths below a directory in stable order."""
         if max_entries <= 0:
             raise ValueError("max_entries must be greater than zero")
+        if max_scan_entries <= 0:
+            raise ValueError("max_scan_entries must be greater than zero")
 
         directory = self.resolve_path(path)
         if not directory.exists():
@@ -107,68 +126,94 @@ class Workspace:
         if not directory.is_dir():
             raise NotADirectoryError(f"Workspace path is not a directory: {path}")
 
-        file_paths, truncated = self._collect_file_paths(directory, max_entries)
+        file_paths, truncated = self._collect_file_paths(
+            directory,
+            max_entries,
+            max_scan_entries,
+        )
         result = "\n".join(file_paths)
         if truncated:
-            result += LIST_TRUNCATION_MARKER
+            result += LIST_TRUNCATION_MARKER if result else LIST_TRUNCATION_MARKER.lstrip("\n")
         return result
 
-    def _collect_file_paths(self, directory: Path, max_entries: int) -> tuple[list[str], bool]:
-        """Traverse only until one extra file proves that the result is truncated."""
+    def _collect_file_paths(
+        self,
+        directory: Path,
+        max_entries: int,
+        max_scan_entries: int,
+    ) -> tuple[list[str], bool]:
+        """Traverse with shared scan and output budgets using an explicit stack."""
         file_paths: list[str] = []
         truncated = False
 
-        def visit(current_directory: Path) -> None:
-            nonlocal truncated
-            entries, directory_truncated = self._read_directory_entries(
-                current_directory,
-                max_entries,
-            )
+        budget = _ScanBudget(max_scan_entries)
+        entries, directory_truncated = self._read_directory_entries(
+            directory,
+            max_entries,
+            budget,
+        )
+        # Each frame stores a directory's bounded, sorted entries and next index.
+        stack: list[tuple[list[os.DirEntry[str]], int, bool]] = [(entries, 0, directory_truncated)]
 
-            for entry in entries:
-                if truncated:
-                    return
-                entry_path = Path(entry.path)
-                if entry.name.casefold() in IGNORED_DIRECTORY_NAMES:
-                    continue
-
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        if self._is_reparse_point(entry_path):
-                            continue
-                        self._ensure_inside_workspace(entry_path)
-                        visit(entry_path)
-                        if truncated:
-                            return
-                    elif entry.is_file(follow_symlinks=False):
-                        if self._is_reparse_point(entry_path):
-                            continue
-                        self._ensure_inside_workspace(entry_path)
-                        file_paths.append(entry_path.relative_to(self.root).as_posix())
-                        if len(file_paths) > max_entries:
-                            truncated = True
-                            return
-                except PermissionError as exc:
-                    raise WorkspaceTraversalError(
-                        f"Permission denied while inspecting workspace path: {entry_path}"
-                    ) from exc
-                except OSError as exc:
-                    raise WorkspaceTraversalError(
-                        f"Unable to inspect workspace path: {entry_path}"
-                    ) from exc
-
-            if directory_truncated:
+        while stack and not truncated:
+            current_entries, index, current_truncated = stack[-1]
+            if budget.exhausted:
                 truncated = True
+                break
+            if index >= len(current_entries):
+                stack.pop()
+                if current_truncated:
+                    truncated = True
+                continue
 
-        visit(directory)
+            entry = current_entries[index]
+            stack[-1] = (current_entries, index + 1, current_truncated)
+            entry_path = Path(entry.path)
+            if entry.name.casefold() in IGNORED_DIRECTORY_NAMES:
+                continue
+
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if self._is_reparse_point(entry_path):
+                        continue
+                    self._ensure_inside_workspace(entry_path)
+                    child_entries, child_truncated = self._read_directory_entries(
+                        entry_path,
+                        max_entries,
+                        budget,
+                    )
+                    if budget.exhausted:
+                        truncated = True
+                        break
+                    stack.append((child_entries, 0, child_truncated))
+                elif entry.is_file(follow_symlinks=False):
+                    if self._is_reparse_point(entry_path):
+                        continue
+                    self._ensure_inside_workspace(entry_path)
+                    file_paths.append(entry_path.relative_to(self.root).as_posix())
+                    if len(file_paths) > max_entries:
+                        truncated = True
+            except PermissionError as exc:
+                raise WorkspaceTraversalError(
+                    f"Permission denied while inspecting workspace path: {entry_path}"
+                ) from exc
+            except OSError as exc:
+                raise WorkspaceTraversalError(
+                    f"Unable to inspect workspace path: {entry_path}"
+                ) from exc
+
         return sorted(file_paths[:max_entries]), truncated
 
     @staticmethod
     def _read_directory_entries(
         current_directory: Path,
         max_entries: int,
+        budget: _ScanBudget,
     ) -> tuple[list[os.DirEntry[str]], bool]:
-        """Read a bounded, sorted window without swallowing scan errors."""
+        """Read a bounded, sorted window while charging a shared scan budget."""
+        if not budget.consume():
+            return [], True
+
         try:
             scanner = os.scandir(current_directory)
         except PermissionError as exc:
@@ -184,17 +229,23 @@ class Workspace:
         directory_truncated = False
         try:
             for _ in range(max_entries + 1):
+                if not budget.consume():
+                    directory_truncated = True
+                    break
                 try:
                     entries.append(next(scanner))
                 except StopIteration:
                     break
             else:
-                try:
-                    next(scanner)
-                except StopIteration:
-                    pass
-                else:
+                if not budget.consume():
                     directory_truncated = True
+                else:
+                    try:
+                        next(scanner)
+                    except StopIteration:
+                        pass
+                    else:
+                        directory_truncated = True
         except PermissionError as exc:
             raise WorkspaceTraversalError(
                 f"Permission denied while scanning workspace directory: {current_directory}"

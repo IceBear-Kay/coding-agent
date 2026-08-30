@@ -189,6 +189,99 @@ def test_list_files_stops_descending_after_budget_is_exceeded(
     assert scanned_entries == 5
 
 
+def test_list_files_global_scan_budget_limits_empty_directory_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(20):
+        (tmp_path / f"empty-{index:02}").mkdir()
+
+    original_scandir = os.scandir
+    scanned_directories: list[str] = []
+    scanned_entries = 0
+
+    class TrackingScanner:
+        def __init__(self, path: str | os.PathLike[str]):
+            self.scanner = original_scandir(path)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal scanned_entries
+            entry = next(self.scanner)
+            scanned_entries += 1
+            return entry
+
+        def close(self):
+            self.scanner.close()
+
+    def tracking_scandir(path: str | os.PathLike[str]):
+        scanned_directories.append(Path(path).relative_to(tmp_path).as_posix() or ".")
+        return TrackingScanner(path)
+
+    monkeypatch.setattr(os, "scandir", tracking_scandir)
+    result = Workspace(tmp_path).list_files(max_entries=100, max_scan_entries=6)
+
+    assert result == "...[file list truncated]"
+    assert len(scanned_directories) + scanned_entries <= 6
+    assert scanned_directories == ["."]
+
+
+def test_list_files_global_scan_budget_is_shared_across_deep_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current = tmp_path
+    for _ in range(50):
+        current = current / "x"
+        current.mkdir()
+
+    original_scandir = os.scandir
+    scanned_directories: list[str] = []
+    scanned_entries = 0
+
+    class TrackingScanner:
+        def __init__(self, path: str | os.PathLike[str]):
+            self.scanner = original_scandir(path)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal scanned_entries
+            entry = next(self.scanner)
+            scanned_entries += 1
+            return entry
+
+        def close(self):
+            self.scanner.close()
+
+    def tracking_scandir(path: str | os.PathLike[str]):
+        scanned_directories.append(Path(path).relative_to(tmp_path).as_posix() or ".")
+        return TrackingScanner(path)
+
+    monkeypatch.setattr(os, "scandir", tracking_scandir)
+    result = Workspace(tmp_path).list_files(max_entries=100, max_scan_entries=8)
+
+    assert result == "...[file list truncated]"
+    assert len(scanned_directories) + scanned_entries <= 8
+    assert len(scanned_directories) < 50
+
+
+def test_list_files_handles_deep_directory_without_recursion(tmp_path: Path) -> None:
+    current = tmp_path
+    for _ in range(45):
+        current = current / "x"
+        current.mkdir()
+    (current / "leaf.txt").write_text("leaf", encoding="utf-8")
+
+    result = Workspace(tmp_path).list_files(max_entries=1, max_scan_entries=500)
+
+    assert result.startswith("x/x/")
+    assert result.endswith("leaf.txt")
+
+
 def test_list_files_skips_directory_symlink_escape(tmp_path: Path) -> None:
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     outside.mkdir()

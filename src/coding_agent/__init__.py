@@ -13,6 +13,7 @@ from coding_agent.provider import FakeProvider, ModelProvider, OpenAICompatibleP
 from coding_agent.tools import (
     DEFAULT_MAX_LIST_ENTRIES,
     DEFAULT_MAX_OUTPUT_CHARS,
+    DEFAULT_MAX_SCAN_ENTRIES,
     LIST_TRUNCATION_MARKER,
     TRUNCATION_MARKER,
     ListFilesArguments,
@@ -36,6 +37,7 @@ __all__ = [
     "AgentState",
     "DEFAULT_MAX_LIST_ENTRIES",
     "DEFAULT_MAX_OUTPUT_CHARS",
+    "DEFAULT_MAX_SCAN_ENTRIES",
     "FakeProvider",
     "ListFilesArguments",
     "LIST_TRUNCATION_MARKER",
