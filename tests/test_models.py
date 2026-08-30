@@ -1,7 +1,9 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
-from coding_agent.models import Message, ModelResponse, ToolCall, ToolResult, Usage
+from coding_agent.models import AgentState, Message, ModelResponse, ToolCall, ToolResult, Usage
 
 
 @pytest.mark.parametrize("role", ["system", "user", "assistant"])
@@ -40,6 +42,76 @@ def test_message_rejects_non_string_content() -> None:
         Message.model_validate({"role": "user", "content": 123})
 
     assert exc_info.value.errors()[0]["loc"] == ("content",)
+
+
+def test_agent_state_has_safe_runtime_defaults(tmp_path: Path) -> None:
+    state = AgentState(workspace_root=tmp_path, max_steps=5)
+
+    assert state.workspace_root == tmp_path
+    assert state.max_steps == 5
+    assert state.messages == []
+    assert state.step_count == 0
+    assert state.stop_reason is None
+
+
+def test_agent_state_builds_nested_messages(tmp_path: Path) -> None:
+    state = AgentState.model_validate(
+        {
+            "workspace_root": tmp_path,
+            "max_steps": 5,
+            "messages": [{"role": "user", "content": "Inspect the project"}],
+            "step_count": 1,
+            "stop_reason": "completed",
+        }
+    )
+
+    assert state.messages == [Message(role="user", content="Inspect the project")]
+    assert state.step_count == 1
+    assert state.stop_reason == "completed"
+
+
+def test_agent_states_do_not_share_message_lists(tmp_path: Path) -> None:
+    first = AgentState(workspace_root=tmp_path, max_steps=5)
+    second = AgentState(workspace_root=tmp_path, max_steps=5)
+
+    first.messages.append(Message(role="user", content="First task"))
+
+    assert len(first.messages) == 1
+    assert second.messages == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("step_count", -1), ("max_steps", 0)],
+)
+def test_agent_state_rejects_invalid_step_counts(
+    field: str,
+    value: int,
+    tmp_path: Path,
+) -> None:
+    data = {"workspace_root": tmp_path, "max_steps": 5, field: value}
+
+    with pytest.raises(ValidationError) as exc_info:
+        AgentState.model_validate(data)
+
+    assert exc_info.value.errors()[0]["loc"] == (field,)
+
+
+def test_agent_state_requires_workspace_and_step_limit() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        AgentState.model_validate({})
+
+    assert {error["loc"] for error in exc_info.value.errors()} == {
+        ("workspace_root",),
+        ("max_steps",),
+    }
+
+
+def test_agent_state_rejects_empty_stop_reason(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        AgentState(workspace_root=tmp_path, max_steps=5, stop_reason="")
+
+    assert exc_info.value.errors()[0]["loc"] == ("stop_reason",)
 
 
 def test_model_response_stores_text_and_metadata() -> None:

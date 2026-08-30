@@ -1,5 +1,6 @@
 """Shared data models used by the coding agent."""
 
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -12,6 +13,16 @@ class Message(BaseModel):
 
     role: MessageRole
     content: str = Field(min_length=1)
+
+
+class AgentState(BaseModel):
+    """Mutable state carried across steps of an agent run."""
+
+    workspace_root: Path
+    max_steps: int = Field(gt=0)
+    messages: list[Message] = Field(default_factory=list)
+    step_count: int = Field(default=0, ge=0)
+    stop_reason: str | None = Field(default=None, min_length=1)
 
 
 class ToolCall(BaseModel):
