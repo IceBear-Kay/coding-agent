@@ -41,9 +41,42 @@ def build_chat_completion_payload(
     """Build the JSON-compatible body for an OpenAI-compatible chat request."""
     return {
         "model": config.model,
-        "messages": [message.model_dump() for message in messages],
+        "messages": [serialize_message_for_api(message) for message in messages],
         "tools": list(tool_schemas),
     }
+
+
+def serialize_message_for_api(message: Message) -> dict[str, Any]:
+    """Convert one internal message into the provider's message format."""
+    serialized: dict[str, Any] = {
+        "role": message.role,
+        "content": message.content,
+    }
+
+    if message.reasoning_content is not None:
+        serialized["reasoning_content"] = message.reasoning_content
+    if message.tool_calls:
+        serialized["tool_calls"] = [
+            {
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_call.name,
+                    "arguments": _serialize_tool_arguments(tool_call.arguments),
+                },
+            }
+            for tool_call in message.tool_calls
+        ]
+    if message.tool_call_id is not None:
+        serialized["tool_call_id"] = message.tool_call_id
+    return serialized
+
+
+def _serialize_tool_arguments(arguments: dict[str, Any]) -> str:
+    try:
+        return json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ProviderResponseError("Tool call arguments are not JSON serializable") from exc
 
 
 def send_chat_completion_request(
@@ -62,7 +95,12 @@ def send_chat_completion_request(
 
     try:
         try:
-            response = request_client.post(url, headers=headers, json=payload)
+            response = request_client.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=config.timeout_seconds,
+            )
         except httpx.TimeoutException as exc:
             raise ProviderNetworkError("Provider request timed out") from exc
         except httpx.NetworkError as exc:
@@ -111,13 +149,24 @@ def parse_chat_completion_response(raw_response: Any) -> ModelResponse:
     if not isinstance(message, dict):
         raise ProviderResponseError("Provider choice is missing a message object")
 
+    if message.get("role") != "assistant":
+        raise ProviderResponseError("Provider message role must be assistant")
+    if "content" not in message:
+        raise ProviderResponseError("Provider message is missing content")
+
     text = message.get("content")
     if text is not None and not isinstance(text, str):
         raise ProviderResponseError("Provider message content must be a string or null")
 
+    reasoning_content = message.get("reasoning_content")
+    if reasoning_content is not None and not isinstance(reasoning_content, str):
+        raise ProviderResponseError("Provider reasoning_content must be a string or null")
+
     raw_tool_calls = message.get("tool_calls", [])
     if not isinstance(raw_tool_calls, list):
         raise ProviderResponseError("Provider tool_calls must be a list")
+    if not text and not raw_tool_calls:
+        raise ProviderResponseError("Provider message must contain content or tool_calls")
 
     tool_calls: list[ToolCall] = []
     for index, raw_tool_call in enumerate(raw_tool_calls):
@@ -179,6 +228,7 @@ def parse_chat_completion_response(raw_response: Any) -> ModelResponse:
 
     return ModelResponse(
         text=text,
+        reasoning_content=reasoning_content,
         tool_calls=tool_calls,
         usage=usage,
         finish_reason=finish_reason,

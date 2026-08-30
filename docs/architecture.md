@@ -23,6 +23,9 @@ CLI
 - **Tool Registry/Dispatcher**：暴露工具 Schema、验证参数并调度本地实现。
 - **Context Policy**：限制工具输出，后续负责裁剪和压缩历史。
 
+消息支持 `system`、`user`、`assistant` 和 `tool` 四种角色。Assistant 消息可以携带
+`reasoning_content` 与结构化 `ToolCall`；Tool 消息通过 `tool_call_id` 关联调用并保存工具结果。
+
 ## Initial technology choices
 
 - Python 3.12 与 uv。
@@ -41,6 +44,9 @@ CLI
 5. 验证并执行每个 Tool Call。
 6. 使用原始 `tool_call_id` 追加 Tool Result。
 7. 达到最大步骤或致命错误时停止，否则继续循环。
+
+Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数编码为 JSON 字符串，
+并在携带工具的后续请求中保留 Assistant 的 `reasoning_content`。
 
 ## Delivery stages
 

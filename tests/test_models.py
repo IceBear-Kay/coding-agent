@@ -15,7 +15,7 @@ def test_message_accepts_supported_text_roles(role: str) -> None:
 
 def test_message_rejects_unsupported_role() -> None:
     with pytest.raises(ValidationError) as exc_info:
-        Message.model_validate({"role": "tool", "content": "Result"})
+        Message.model_validate({"role": "developer", "content": "Result"})
 
     assert exc_info.value.errors()[0]["loc"] == ("role",)
 
@@ -34,7 +34,7 @@ def test_message_rejects_empty_content() -> None:
     with pytest.raises(ValidationError) as exc_info:
         Message(role="user", content="")
 
-    assert exc_info.value.errors()[0]["loc"] == ("content",)
+    assert exc_info.value.errors()[0]["loc"] == ()
 
 
 def test_message_rejects_non_string_content() -> None:
@@ -42,6 +42,67 @@ def test_message_rejects_non_string_content() -> None:
         Message.model_validate({"role": "user", "content": 123})
 
     assert exc_info.value.errors()[0]["loc"] == ("content",)
+
+
+def test_assistant_message_preserves_reasoning_and_tool_calls() -> None:
+    call = ToolCall(
+        id="call_1",
+        name="read_file",
+        arguments={"path": "README.md"},
+    )
+
+    message = Message(
+        role="assistant",
+        content=None,
+        reasoning_content="I should inspect the README first.",
+        tool_calls=[call],
+    )
+
+    assert message.content is None
+    assert message.reasoning_content == "I should inspect the README first."
+    assert message.tool_calls == [call]
+
+
+@pytest.mark.parametrize("content", ["", None])
+def test_assistant_message_allows_empty_or_null_content(content: str | None) -> None:
+    message = Message(role="assistant", content=content)
+
+    assert message.content == content
+
+
+def test_tool_message_preserves_call_id_and_result() -> None:
+    message = Message(
+        role="tool",
+        content="README contents",
+        tool_call_id="call_1",
+    )
+
+    assert message.model_dump() == {
+        "role": "tool",
+        "content": "README contents",
+        "tool_call_id": "call_1",
+    }
+
+
+def test_tool_message_requires_call_id() -> None:
+    with pytest.raises(ValidationError, match="tool_call_id"):
+        Message(role="tool", content="README contents")
+
+
+def test_non_assistant_messages_reject_reasoning_and_tool_calls() -> None:
+    with pytest.raises(ValidationError, match="reasoning_content"):
+        Message(
+            role="user",
+            content="Inspect the project",
+            reasoning_content="Hidden reasoning",
+        )
+
+    with pytest.raises(ValidationError, match="tool_calls"):
+        Message(
+            role="user",
+            content="Inspect the project",
+            tool_calls=[ToolCall(id="call_1", name="read_file", arguments={})],
+        )
 
 
 def test_agent_state_has_safe_runtime_defaults(tmp_path: Path) -> None:
@@ -68,6 +129,29 @@ def test_agent_state_builds_nested_messages(tmp_path: Path) -> None:
     assert state.messages == [Message(role="user", content="Inspect the project")]
     assert state.step_count == 1
     assert state.stop_reason == "completed"
+
+
+def test_agent_state_accepts_assistant_and_tool_history(tmp_path: Path) -> None:
+    history = [
+        Message(role="user", content="Read README.md"),
+        Message(
+            role="assistant",
+            content=None,
+            reasoning_content="I will call read_file.",
+            tool_calls=[
+                ToolCall(
+                    id="call_1",
+                    name="read_file",
+                    arguments={"path": "README.md"},
+                )
+            ],
+        ),
+        Message(role="tool", content="README contents", tool_call_id="call_1"),
+    ]
+
+    state = AgentState(workspace_root=tmp_path, max_steps=5, messages=history)
+
+    assert state.messages == history
 
 
 def test_agent_states_do_not_share_message_lists(tmp_path: Path) -> None:
