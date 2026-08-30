@@ -7,7 +7,9 @@ name = "coding-agent"
 version = "0.1.0"
 description = "A locally executed coding agent built from first principles."
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "pydantic>=2.10,<3",
+]
 
 [dependency-groups]
 dev = [
