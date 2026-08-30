@@ -278,6 +278,12 @@ class _WriteFileHandler:
                 bytes_written = file_handle.write(plan.content)
                 if bytes_written != len(plan.content):
                     raise OSError("Unable to write the complete file content")
+        except KeyboardInterrupt:
+            _cleanup_created_paths(
+                plan.target if target_created else None,
+                created_directories,
+            )
+            raise
         except FileExistsError:
             cleanup_incomplete = _cleanup_created_paths(
                 plan.target if target_created else None,
@@ -406,7 +412,7 @@ class _EditFileHandler:
             arguments.path,
             self._max_content_bytes,
         )
-        match_count = source.text.count(arguments.old_text)
+        match_count = _count_overlapping_matches(source.text, arguments.old_text)
         if match_count == 0:
             raise _TextMatchError("no_match", "old_text was not found in the target file.")
         if match_count > 1:
@@ -459,6 +465,11 @@ class _EditFileHandler:
             self._assert_current(plan, parent_identity_only=True)
             os.replace(temporary_path, plan.target)
             temporary_path = None
+        except KeyboardInterrupt:
+            _close_file_descriptor(descriptor)
+            descriptor = None
+            _cleanup_temporary_file(temporary_path, self._workspace.root)
+            raise
         except _EditConflictError as exc:
             _close_file_descriptor(descriptor)
             descriptor = None
@@ -584,7 +595,10 @@ def _inspect_parent_path(
     parts: tuple[str, ...],
 ) -> tuple[list[Path], list[_ParentFingerprint]]:
     missing_parents: list[Path] = []
-    existing_parents: list[_ParentFingerprint] = []
+    root_stat = _lstat(workspace_root)
+    if root_stat is None or _is_reparse_point(root_stat) or not stat.S_ISDIR(root_stat.st_mode):
+        raise _UnsafeWritePathError("Workspace root changed or is not a safe directory.")
+    existing_parents = [_make_parent_fingerprint(workspace_root, root_stat)]
     current = workspace_root
 
     for part in parts[:-1]:
@@ -638,6 +652,19 @@ def _same_parent_identities(
         and left.mode == right.mode
         for left, right in zip(first, second, strict=True)
     )
+
+
+def _count_overlapping_matches(text: str, fragment: str) -> int:
+    """Count only far enough to distinguish zero, one, and multiple matches."""
+    count = 0
+    start = 0
+    while count < 2:
+        position = text.find(fragment, start)
+        if position < 0:
+            break
+        count += 1
+        start = position + 1
+    return count
 
 
 def _load_edit_source(

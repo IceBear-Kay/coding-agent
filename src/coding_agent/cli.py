@@ -104,6 +104,9 @@ def _prompt_for_approval(
     output_fn: Callable[[str], Any],
 ) -> bool:
     output_fn(f"待审批操作: {request.operation}\n{request.preview}")
+    if input_fn is input and not _stdin_is_interactive():
+        output_fn("审批结果: 已拒绝（非交互输入不能用于审批）")
+        return False
     try:
         answer = input_fn("批准本次操作？[y/N]: ")
     except EOFError:
@@ -113,6 +116,13 @@ def _prompt_for_approval(
     approved = answer.strip().casefold() in {"y", "yes"}
     output_fn("审批结果: 已批准" if approved else "审批结果: 已拒绝")
     return approved
+
+
+def _stdin_is_interactive() -> bool:
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, OSError):
+        return False
 
 
 def main(

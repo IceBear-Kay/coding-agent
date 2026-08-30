@@ -196,6 +196,54 @@ def test_write_file_detects_existing_parent_replaced_during_approval(tmp_path: P
     assert not (parent / "file.txt").exists()
 
 
+def test_write_file_detects_workspace_root_replaced_during_approval(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    moved_root = tmp_path / "moved-workspace"
+    workspace = Workspace(workspace_root)
+
+    def approve(_: ApprovalRequest) -> bool:
+        workspace_root.rename(moved_root)
+        workspace_root.mkdir()
+        return True
+
+    result = dispatch_write(workspace, "created.txt", "content", approve)
+
+    assert result.is_error is True
+    assert json.loads(result.content)["status"] == "conflict"
+    assert not (workspace_root / "created.txt").exists()
+    assert not (moved_root / "created.txt").exists()
+
+
+def test_write_file_detects_workspace_root_replaced_with_external_symlink(
+    tmp_path: Path,
+) -> None:
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    moved_root = tmp_path / "moved-workspace"
+    external = tmp_path / "external"
+    external.mkdir()
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(external, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable")
+    probe.unlink()
+    workspace = Workspace(workspace_root)
+
+    def approve(_: ApprovalRequest) -> bool:
+        workspace_root.rename(moved_root)
+        workspace_root.symlink_to(external, target_is_directory=True)
+        return True
+
+    result = dispatch_write(workspace, "escaped.txt", "content", approve)
+
+    assert result.is_error is True
+    assert json.loads(result.content)["status"] == "conflict"
+    assert not (external / "escaped.txt").exists()
+    assert not (moved_root / "escaped.txt").exists()
+
+
 def test_write_file_enforces_utf8_byte_limit_before_approval(tmp_path: Path) -> None:
     approval_calls = 0
 
@@ -387,6 +435,47 @@ def test_write_file_cleans_new_directories_after_open_failure(
     assert not (tmp_path / "new").exists()
 
 
+def test_write_file_cleans_partial_file_and_new_directories_on_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_open = Path.open
+
+    class InterruptingFile:
+        def __init__(self, file_handle):
+            self.file_handle = file_handle
+
+        def __enter__(self):
+            self.file_handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file_handle.__exit__(*args)
+
+        def write(self, content: bytes) -> int:
+            self.file_handle.write(content[:3])
+            self.file_handle.flush()
+            raise KeyboardInterrupt
+
+    def interrupting_open(path: Path, *args, **kwargs):
+        file_handle = original_open(path, *args, **kwargs)
+        if path.name == "partial.txt" and args == ("xb",):
+            return InterruptingFile(file_handle)
+        return file_handle
+
+    monkeypatch.setattr(Path, "open", interrupting_open)
+
+    with pytest.raises(KeyboardInterrupt):
+        dispatch_write(
+            Workspace(tmp_path),
+            "new/partial.txt",
+            "complete content",
+            lambda _: True,
+        )
+
+    assert not (tmp_path / "new").exists()
+
+
 def test_write_file_arguments_forbid_extra_fields() -> None:
     spec = write_file_tool_spec(Workspace(Path.cwd()), lambda _: True)
     result = ToolDispatcher(ToolRegistry([spec])).dispatch(
@@ -467,6 +556,36 @@ def test_edit_file_sends_exact_diff_preview_before_changing_file(tmp_path: Path)
     assert "Path: notes.txt" in requests[0].preview
     assert json.dumps("-beta\r\n") in requests[0].preview
     assert json.dumps("+gamma\r\n") in requests[0].preview
+
+
+def test_edit_file_rejects_overlapping_multiple_matches_without_approval(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("aaa", encoding="utf-8")
+    approval_calls = 0
+
+    def approve(_: ApprovalRequest) -> bool:
+        nonlocal approval_calls
+        approval_calls += 1
+        return True
+
+    result = dispatch_edit(Workspace(tmp_path), "notes.txt", "aa", "X", approve)
+
+    assert result.is_error is True
+    assert json.loads(result.content)["status"] == "multiple_matches"
+    assert approval_calls == 0
+    assert target.read_text(encoding="utf-8") == "aaa"
+
+
+def test_edit_file_allows_one_match_when_no_overlap_exists(tmp_path: Path) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("aab", encoding="utf-8")
+
+    result = dispatch_edit(Workspace(tmp_path), "notes.txt", "aa", "X", lambda _: True)
+
+    assert result.is_error is False
+    assert target.read_text(encoding="utf-8") == "Xb"
 
 
 @pytest.mark.parametrize("approval_callback", [None, lambda _: False])
@@ -786,6 +905,25 @@ def test_edit_file_replace_failure_preserves_original_and_cleans_temp_file(
 
     assert result.is_error is True
     assert json.loads(result.content)["status"] == "failed"
+    assert target.read_text(encoding="utf-8") == "before"
+    assert list(tmp_path.glob(".notes.txt.*.tmp")) == []
+
+
+def test_edit_file_cleans_temporary_file_and_preserves_original_on_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("before", encoding="utf-8")
+
+    def interrupt_fsync(_: int) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "fsync", interrupt_fsync)
+
+    with pytest.raises(KeyboardInterrupt):
+        dispatch_edit(Workspace(tmp_path), "notes.txt", "before", "after", lambda _: True)
+
     assert target.read_text(encoding="utf-8") == "before"
     assert list(tmp_path.glob(".notes.txt.*.tmp")) == []
 
