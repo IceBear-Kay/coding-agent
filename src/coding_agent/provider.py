@@ -19,6 +19,14 @@ from coding_agent.errors import (
 )
 from coding_agent.models import Message, ModelResponse, ToolCall, Usage
 
+EMPTY_CONTENT_FINISH_REASONS = frozenset(
+    {
+        "length",
+        "content_filter",
+        "insufficient_system_resource",
+    }
+)
+
 
 @runtime_checkable
 class ModelProvider(Protocol):
@@ -158,6 +166,10 @@ def parse_chat_completion_response(raw_response: Any) -> ModelResponse:
     if text is not None and not isinstance(text, str):
         raise ProviderResponseError("Provider message content must be a string or null")
 
+    finish_reason = choice.get("finish_reason")
+    if finish_reason is not None and not isinstance(finish_reason, str):
+        raise ProviderResponseError("Provider finish_reason must be a string or null")
+
     reasoning_content = message.get("reasoning_content")
     if reasoning_content is not None and not isinstance(reasoning_content, str):
         raise ProviderResponseError("Provider reasoning_content must be a string or null")
@@ -165,7 +177,7 @@ def parse_chat_completion_response(raw_response: Any) -> ModelResponse:
     raw_tool_calls = message.get("tool_calls", [])
     if not isinstance(raw_tool_calls, list):
         raise ProviderResponseError("Provider tool_calls must be a list")
-    if not text and not raw_tool_calls:
+    if not text and not raw_tool_calls and finish_reason not in EMPTY_CONTENT_FINISH_REASONS:
         raise ProviderResponseError("Provider message must contain content or tool_calls")
 
     tool_calls: list[ToolCall] = []
@@ -205,10 +217,6 @@ def parse_chat_completion_response(raw_response: Any) -> ModelResponse:
             )
         except ValidationError as exc:
             raise ProviderResponseError(f"Provider tool call {index} has invalid fields") from exc
-
-    finish_reason = choice.get("finish_reason")
-    if finish_reason is not None and not isinstance(finish_reason, str):
-        raise ProviderResponseError("Provider finish_reason must be a string or null")
 
     usage = None
     raw_usage = raw_response.get("usage")

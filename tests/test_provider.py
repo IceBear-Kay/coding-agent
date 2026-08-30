@@ -397,9 +397,13 @@ def test_parse_chat_completion_response_accepts_null_content_with_tool_call() ->
     assert response.tool_calls[0].name == "read_file"
 
 
-@pytest.mark.parametrize("content", [None, ""])
+@pytest.mark.parametrize(
+    ("content", "finish_reason"),
+    [(content, finish_reason) for content in (None, "") for finish_reason in (None, "stop")],
+)
 def test_parse_chat_completion_response_rejects_empty_completion_without_tool_call(
     content: str | None,
+    finish_reason: str | None,
 ) -> None:
     with pytest.raises(ProviderResponseError):
         parse_chat_completion_response(
@@ -409,11 +413,46 @@ def test_parse_chat_completion_response_rejects_empty_completion_without_tool_ca
                         "message": {
                             "role": "assistant",
                             "content": content,
-                        }
+                        },
+                        "finish_reason": finish_reason,
                     }
                 ]
             }
         )
+
+
+@pytest.mark.parametrize(
+    "finish_reason",
+    [
+        "length",
+        "content_filter",
+        "insufficient_system_resource",
+    ],
+)
+@pytest.mark.parametrize("content", [None, ""])
+def test_parse_chat_completion_response_accepts_empty_content_with_terminal_reason(
+    content: str | None,
+    finish_reason: str,
+) -> None:
+    response = parse_chat_completion_response(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": content,
+                        "reasoning_content": "Partial reasoning",
+                    },
+                    "finish_reason": finish_reason,
+                }
+            ]
+        }
+    )
+
+    assert response.text == content
+    assert response.reasoning_content == "Partial reasoning"
+    assert response.tool_calls == []
+    assert response.finish_reason == finish_reason
 
 
 @pytest.mark.parametrize(
