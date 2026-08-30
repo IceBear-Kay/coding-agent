@@ -429,6 +429,24 @@ def test_edit_file_replaces_one_exact_fragment_and_preserves_line_endings(
     assert target.read_bytes() == expected.encode("utf-8")
 
 
+def test_edit_file_succeeds_in_existing_nested_directory(tmp_path: Path) -> None:
+    parent = tmp_path / "nested"
+    parent.mkdir()
+    target = parent / "notes.txt"
+    target.write_text("before", encoding="utf-8")
+
+    result = dispatch_edit(
+        Workspace(tmp_path),
+        "nested/notes.txt",
+        "before",
+        "after",
+        lambda _: True,
+    )
+
+    assert result.is_error is False
+    assert target.read_text(encoding="utf-8") == "after"
+
+
 def test_edit_file_sends_exact_diff_preview_before_changing_file(tmp_path: Path) -> None:
     target = tmp_path / "notes.txt"
     original = "alpha\r\nbeta\r\n"

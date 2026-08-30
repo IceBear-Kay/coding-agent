@@ -98,6 +98,9 @@ class _ParentFingerprint:
     path: Path
     device: int
     inode: int
+    mode: int
+    modified_ns: int
+    changed_ns: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,13 +255,7 @@ class _WriteFileHandler:
         try:
             for fingerprint in plan.existing_parents:
                 parent_stat = _lstat(fingerprint.path)
-                if (
-                    parent_stat is None
-                    or _is_reparse_point(parent_stat)
-                    or not stat.S_ISDIR(parent_stat.st_mode)
-                    or parent_stat.st_dev != fingerprint.device
-                    or parent_stat.st_ino != fingerprint.inode
-                ):
+                if not _matches_parent_fingerprint(fingerprint, parent_stat):
                     raise _UnsafeWritePathError("Write path parent changed before file creation.")
 
             for directory in plan.missing_parents:
@@ -459,7 +456,7 @@ class _EditFileHandler:
                 os.fsync(file_handle.fileno())
 
             os.chmod(temporary_path, stat.S_IMODE(plan.source_fingerprint.mode))
-            self._assert_current(plan)
+            self._assert_current(plan, parent_identity_only=True)
             os.replace(temporary_path, plan.target)
             temporary_path = None
         except _EditConflictError as exc:
@@ -494,7 +491,12 @@ class _EditFileHandler:
             },
         )
 
-    def _assert_current(self, plan: _EditPlan) -> None:
+    def _assert_current(
+        self,
+        plan: _EditPlan,
+        *,
+        parent_identity_only: bool = False,
+    ) -> None:
         try:
             source = _load_edit_source(
                 self._workspace,
@@ -511,7 +513,12 @@ class _EditFileHandler:
             _EditConflictError,
         ) as exc:
             raise _EditConflictError(f"Edit target changed before replacement: {exc}") from exc
-        if source.parents != plan.parents or source.fingerprint != plan.source_fingerprint:
+        parents_match = (
+            _same_parent_identities(source.parents, plan.parents)
+            if parent_identity_only
+            else source.parents == plan.parents
+        )
+        if not parents_match or source.fingerprint != plan.source_fingerprint:
             raise _EditConflictError("Edit target changed before replacement.")
 
     @staticmethod
@@ -592,15 +599,45 @@ def _inspect_parent_path(
             )
         if not stat.S_ISDIR(path_stat.st_mode):
             raise _UnsafeWritePathError(f"Write path parent is not a directory: {part}")
-        existing_parents.append(
-            _ParentFingerprint(
-                path=current,
-                device=path_stat.st_dev,
-                inode=path_stat.st_ino,
-            )
-        )
+        existing_parents.append(_make_parent_fingerprint(current, path_stat))
 
     return missing_parents, existing_parents
+
+
+def _make_parent_fingerprint(path: Path, path_stat: stat_result) -> _ParentFingerprint:
+    return _ParentFingerprint(
+        path=path,
+        device=path_stat.st_dev,
+        inode=path_stat.st_ino,
+        mode=path_stat.st_mode,
+        modified_ns=path_stat.st_mtime_ns,
+        changed_ns=path_stat.st_ctime_ns,
+    )
+
+
+def _matches_parent_fingerprint(
+    fingerprint: _ParentFingerprint,
+    path_stat: stat_result | None,
+) -> bool:
+    return (
+        path_stat is not None
+        and not _is_reparse_point(path_stat)
+        and stat.S_ISDIR(path_stat.st_mode)
+        and _make_parent_fingerprint(fingerprint.path, path_stat) == fingerprint
+    )
+
+
+def _same_parent_identities(
+    first: tuple[_ParentFingerprint, ...],
+    second: tuple[_ParentFingerprint, ...],
+) -> bool:
+    return len(first) == len(second) and all(
+        left.path == right.path
+        and left.device == right.device
+        and left.inode == right.inode
+        and left.mode == right.mode
+        for left, right in zip(first, second, strict=True)
+    )
 
 
 def _load_edit_source(
