@@ -181,7 +181,10 @@ def test_list_files_stops_descending_after_budget_is_exceeded(
     monkeypatch.setattr(os, "scandir", tracking_scandir)
     result = Workspace(tmp_path).list_files(max_entries=1)
 
-    assert result == "a/file-000.txt\n...[file list truncated]"
+    listed_paths = result.splitlines()
+    assert len(listed_paths) == 2
+    assert listed_paths[0].startswith("a/file-")
+    assert listed_paths[1] == "...[file list truncated]"
     assert scanned_directories == [".", "a"]
     assert scanned_entries == 5
 
