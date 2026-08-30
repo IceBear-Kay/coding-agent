@@ -6,16 +6,14 @@ from typing import Self
 
 from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, ValidationError
 
+from coding_agent.errors import ProviderConfigurationError
+
 ENVIRONMENT_FIELDS = {
     "api_key": "DEEPSEEK_API_KEY",
     "base_url": "DEEPSEEK_BASE_URL",
     "model": "DEEPSEEK_MODEL",
     "timeout_seconds": "DEEPSEEK_TIMEOUT_SECONDS",
 }
-
-
-class ProviderConfigurationError(ValueError):
-    """Raised when provider configuration is missing or invalid."""
 
 
 class ProviderConfig(BaseModel):

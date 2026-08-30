@@ -1,6 +1,7 @@
 import pytest
 
-from coding_agent.config import ProviderConfig, ProviderConfigurationError
+from coding_agent.config import ProviderConfig
+from coding_agent.errors import ProviderConfigurationError
 
 
 def valid_environment() -> dict[str, str]:
