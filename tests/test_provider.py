@@ -1,8 +1,9 @@
 from collections.abc import Sequence
 from typing import Any
 
+from coding_agent.config import ProviderConfig
 from coding_agent.models import Message, ModelResponse
-from coding_agent.provider import ModelProvider
+from coding_agent.provider import ModelProvider, build_chat_completion_payload
 
 
 class RecordingProvider:
@@ -45,3 +46,54 @@ def test_model_provider_accepts_a_structural_test_double() -> None:
 
 def test_model_provider_rejects_an_object_without_complete() -> None:
     assert not isinstance(object(), ModelProvider)
+
+
+def test_build_chat_completion_payload_serializes_messages_and_tools() -> None:
+    config = ProviderConfig(
+        api_key="test-secret-key",
+        base_url="https://api.example.com/v1",
+        model="test-model",
+        timeout_seconds=30,
+    )
+    messages = [
+        Message(role="system", content="You are helpful."),
+        Message(role="user", content="Read README.md"),
+    ]
+    tool_schemas = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+
+    payload = build_chat_completion_payload(config, messages, tool_schemas)
+
+    assert payload == {
+        "model": "test-model",
+        "messages": [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Read README.md"},
+        ],
+        "tools": tool_schemas,
+    }
+    assert "test-secret-key" not in repr(payload)
+
+
+def test_build_chat_completion_payload_accepts_no_tools() -> None:
+    config = ProviderConfig(
+        api_key="test-secret-key",
+        base_url="https://api.example.com/v1",
+        model="test-model",
+        timeout_seconds=30,
+    )
+
+    payload = build_chat_completion_payload(
+        config,
+        [Message(role="user", content="Hello")],
+        [],
+    )
+
+    assert payload["tools"] == []
