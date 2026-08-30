@@ -120,62 +120,94 @@ class Workspace:
 
         def visit(current_directory: Path) -> None:
             nonlocal truncated
-            try:
-                scanner = os.scandir(current_directory)
-            except PermissionError as exc:
-                raise WorkspaceTraversalError(
-                    f"Permission denied while scanning workspace directory: {current_directory}"
-                ) from exc
-            except OSError as exc:
-                raise WorkspaceTraversalError(
-                    f"Unable to scan workspace directory: {current_directory}"
-                ) from exc
+            entries, directory_truncated = self._read_directory_entries(
+                current_directory,
+                max_entries,
+            )
 
-            try:
-                for entry in scanner:
-                    if truncated:
-                        return
-                    entry_path = Path(entry.path)
-                    if entry.name.casefold() in IGNORED_DIRECTORY_NAMES:
-                        continue
+            for entry in entries:
+                if truncated:
+                    return
+                entry_path = Path(entry.path)
+                if entry.name.casefold() in IGNORED_DIRECTORY_NAMES:
+                    continue
 
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            if self._is_reparse_point(entry_path):
-                                continue
-                            self._ensure_inside_workspace(entry_path)
-                            visit(entry_path)
-                            if truncated:
-                                return
-                        elif entry.is_file(follow_symlinks=False):
-                            if self._is_reparse_point(entry_path):
-                                continue
-                            self._ensure_inside_workspace(entry_path)
-                            file_paths.append(entry_path.relative_to(self.root).as_posix())
-                            if len(file_paths) > max_entries:
-                                truncated = True
-                                return
-                    except PermissionError as exc:
-                        raise WorkspaceTraversalError(
-                            f"Permission denied while inspecting workspace path: {entry_path}"
-                        ) from exc
-                    except OSError as exc:
-                        raise WorkspaceTraversalError(
-                            f"Unable to inspect workspace path: {entry_path}"
-                        ) from exc
-            except PermissionError as exc:
-                raise WorkspaceTraversalError(
-                    f"Permission denied while scanning workspace directory: {current_directory}"
-                ) from exc
-            except OSError as exc:
-                raise WorkspaceTraversalError(
-                    f"Unable to scan workspace directory: {current_directory}"
-                ) from exc
-            finally:
-                scanner.close()
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if self._is_reparse_point(entry_path):
+                            continue
+                        self._ensure_inside_workspace(entry_path)
+                        visit(entry_path)
+                        if truncated:
+                            return
+                    elif entry.is_file(follow_symlinks=False):
+                        if self._is_reparse_point(entry_path):
+                            continue
+                        self._ensure_inside_workspace(entry_path)
+                        file_paths.append(entry_path.relative_to(self.root).as_posix())
+                        if len(file_paths) > max_entries:
+                            truncated = True
+                            return
+                except PermissionError as exc:
+                    raise WorkspaceTraversalError(
+                        f"Permission denied while inspecting workspace path: {entry_path}"
+                    ) from exc
+                except OSError as exc:
+                    raise WorkspaceTraversalError(
+                        f"Unable to inspect workspace path: {entry_path}"
+                    ) from exc
+
+            if directory_truncated:
+                truncated = True
 
         visit(directory)
         return sorted(file_paths[:max_entries]), truncated
+
+    @staticmethod
+    def _read_directory_entries(
+        current_directory: Path,
+        max_entries: int,
+    ) -> tuple[list[os.DirEntry[str]], bool]:
+        """Read a bounded, sorted window without swallowing scan errors."""
+        try:
+            scanner = os.scandir(current_directory)
+        except PermissionError as exc:
+            raise WorkspaceTraversalError(
+                f"Permission denied while scanning workspace directory: {current_directory}"
+            ) from exc
+        except OSError as exc:
+            raise WorkspaceTraversalError(
+                f"Unable to scan workspace directory: {current_directory}"
+            ) from exc
+
+        entries: list[os.DirEntry[str]] = []
+        directory_truncated = False
+        try:
+            for _ in range(max_entries + 1):
+                try:
+                    entries.append(next(scanner))
+                except StopIteration:
+                    break
+            else:
+                try:
+                    next(scanner)
+                except StopIteration:
+                    pass
+                else:
+                    directory_truncated = True
+        except PermissionError as exc:
+            raise WorkspaceTraversalError(
+                f"Permission denied while scanning workspace directory: {current_directory}"
+            ) from exc
+        except OSError as exc:
+            raise WorkspaceTraversalError(
+                f"Unable to scan workspace directory: {current_directory}"
+            ) from exc
+        finally:
+            scanner.close()
+
+        entries.sort(key=lambda entry: entry.name.casefold())
+        return entries, directory_truncated
 
     def _ensure_inside_workspace(self, path: Path) -> None:
         try:

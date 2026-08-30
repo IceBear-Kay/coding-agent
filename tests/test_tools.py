@@ -147,7 +147,8 @@ def test_list_files_stops_descending_after_budget_is_exceeded(
 ) -> None:
     first = tmp_path / "a"
     first.mkdir()
-    for name in ["one.txt", "two.txt", "three.txt"]:
+    for index in range(100):
+        name = f"file-{index:03}.txt"
         (first / name).write_text(name, encoding="utf-8")
     later = tmp_path / "z"
     later.mkdir()
@@ -180,9 +181,9 @@ def test_list_files_stops_descending_after_budget_is_exceeded(
     monkeypatch.setattr(os, "scandir", tracking_scandir)
     result = Workspace(tmp_path).list_files(max_entries=1)
 
-    assert result == "a/one.txt\n...[file list truncated]"
+    assert result == "a/file-000.txt\n...[file list truncated]"
     assert scanned_directories == [".", "a"]
-    assert scanned_entries == 3
+    assert scanned_entries == 5
 
 
 def test_list_files_skips_directory_symlink_escape(tmp_path: Path) -> None:
