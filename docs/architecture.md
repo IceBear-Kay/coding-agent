@@ -23,6 +23,10 @@ CLI
 - **Tool Registry/Dispatcher**：暴露工具 Schema、验证参数并调度本地实现。
 - **Context Policy**：限制工具输出，后续负责裁剪和压缩历史。
 
+CLI 通过轻量执行事件显示实际的工具调用和结构化结果摘要，包括文件相对路径、命令
+退出状态、超时或截断信息；它不展示认证信息、完整 API 请求或模型的
+`reasoning_content`。正常结束只表示模型不再请求工具，不等于任务已经通过独立测试。
+
 消息支持 `system`、`user`、`assistant` 和 `tool` 四种角色。Assistant 消息可以携带
 `reasoning_content` 与结构化 `ToolCall`；Tool 消息通过 `tool_call_id` 关联调用并保存工具结果。
 
@@ -45,6 +49,11 @@ CLI
 6. 使用原始 `tool_call_id` 追加 Tool Result。
 7. 达到最大步骤或致命错误时停止，否则继续循环。
 
+工具返回的成功、失败、拒绝、超时和输出超限结果都会原样作为下一轮 `tool` 消息提供给
+模型。临时 Provider 错误可在有限预算内重试，但不会重放上一轮已经完成的副作用操作；
+`length`、`content_filter` 和 `insufficient_system_resource` 等非正常停止原因会保留并
+立即结束本次循环，不执行响应中携带的工具调用。
+
 Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数编码为 JSON 字符串，
 并在携带工具的后续请求中保留 Assistant 的 `reasoning_content`。
 
@@ -64,6 +73,7 @@ Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数�
 - `write_file` 只排他创建新 UTF-8 文件，`edit_file` 只执行一次精确文本替换。两者每次调用都展示完整预览并等待用户确认，批准后还会复核目标状态。
 - `run_command` 接收结构化 argv、工作区内 cwd 和独立 stdin，以 `shell=False` 启动进程；stdout/stderr 共享有界读取预算，并返回退出码、耗时、截断和执行状态。超时、输出超限和中断会触发普通进程树清理。
 - Agent Loop 会保留完整对话历史、Assistant Tool Calls、`reasoning_content` 和原始 `tool_call_id`，并区分正常完成、`max_steps`、`interrupted`、Provider 错误及非正常 `finish_reason`。
+- 端到端离线测试使用 `FakeProvider` 驱动真实文件和受控本地进程，覆盖读取题目、批准写入、运行失败、精确编辑、再次运行成功以及拒绝和超时路径；OpenAI-compatible 协议使用 `httpx.MockTransport` 验证，不调用真实模型。
 - 当前不删除文件，不提供自动审批、持久化会话或上下文压缩。本地命令以当前用户权限运行；路径检查、最小环境、资源预算和审批不等同于操作系统沙箱。
 
 ## Safety

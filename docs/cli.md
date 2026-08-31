@@ -16,6 +16,23 @@ uv run coding-agent "请读取 docs/architecture.md 并总结项目架构" --wor
 uv run coding-agent --workspace .
 ```
 
+## 参数速查
+
+- `task`：一次任务的文本；省略时从终端读取。
+- `--workspace` / `-w`：工作区目录，默认是当前目录。
+- `--max-steps`：本次运行允许的 Provider 调用次数，默认 8；临时错误重试也计入预算。
+- `--max-retries`：单次临时 Provider 错误最多重试次数，默认 2；设为 0 可关闭自动重试。
+- `--allow-write`：开放 `write_file` 和 `edit_file`，每个副作用操作仍需单独审批。
+- `--allow-exec`：开放 `run_command`，每个命令仍需单独审批。
+- `--command-timeout`：命令超时上限，默认 10 秒，最大 60 秒。
+- `--command-output-limit`：stdout 和 stderr 共享的输出字节上限，默认 65536。
+
+查看当前版本的完整参数说明：
+
+```powershell
+uv run coding-agent --help
+```
+
 ## 经审批的文件修改
 
 需要创建或精确修改 UTF-8 文本文件时，显式增加 `--allow-write`：

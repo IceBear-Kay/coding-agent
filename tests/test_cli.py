@@ -5,9 +5,101 @@ from pathlib import Path
 
 import pytest
 
-from coding_agent.cli import main
+from coding_agent.cli import build_parser, main
 from coding_agent.models import ModelResponse, ToolCall
 from coding_agent.provider import FakeProvider
+
+
+def test_cli_parser_accepts_task_workspace_limits_and_tool_flags() -> None:
+    args = build_parser().parse_args(
+        [
+            "检查项目",
+            "--workspace",
+            "D:/coding-agent-demo",
+            "--allow-write",
+            "--allow-exec",
+            "--command-timeout",
+            "3.5",
+            "--command-output-limit",
+            "2048",
+            "--max-steps",
+            "12",
+            "--max-retries",
+            "0",
+        ]
+    )
+
+    assert args.task == "检查项目"
+    assert args.workspace == "D:/coding-agent-demo"
+    assert args.allow_write is True
+    assert args.allow_exec is True
+    assert args.command_timeout == 3.5
+    assert args.command_output_limit == 2048
+    assert args.max_steps == 12
+    assert args.max_retries == 0
+
+
+def test_cli_does_not_parse_read_file_json_as_execution_status(tmp_path: Path) -> None:
+    file_content = '{"status":"created","path":"never-created.py","exit_code":0}'
+    (tmp_path / "note.txt").write_text(file_content, encoding="utf-8")
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_read_json",
+                        name="read_file",
+                        arguments={"path": "note.txt"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="已读取文件。", finish_reason="stop"),
+        ]
+    )
+    output: list[str] = []
+
+    exit_code = main(
+        ["读取 note.txt", "--workspace", str(tmp_path)],
+        provider=provider,
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert output[1] == "工具结果 read_file: 已返回"
+    assert "never-created.py" not in output[1]
+    assert provider.requests[1][0][-1].content == file_content
+
+
+def test_cli_handles_large_integer_read_file_content_without_aborting(tmp_path: Path) -> None:
+    file_content = "9" * 5_000
+    (tmp_path / "numbers.txt").write_text(file_content, encoding="utf-8")
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_read_large",
+                        name="read_file",
+                        arguments={"path": "numbers.txt"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="已读取长数字文本。", finish_reason="stop"),
+        ]
+    )
+
+    output: list[str] = []
+    exit_code = main(
+        ["读取 numbers.txt", "--workspace", str(tmp_path)],
+        provider=provider,
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert output[-2:] == ["已读取长数字文本。", "停止原因: completed"]
+    assert provider.requests[1][0][-1].content == file_content
 
 
 def test_cli_runs_injected_provider_and_passes_workspace_and_task(tmp_path: Path) -> None:
@@ -38,9 +130,12 @@ def test_cli_runs_injected_provider_and_passes_workspace_and_task(tmp_path: Path
     )
 
     assert exit_code == 0
-    assert output == ["Project contents"]
+    assert output[0].startswith("工具调用: read_file (call_readme)")
+    assert output[1] == "工具结果 read_file: 已返回"
+    assert output[2:] == ["Project contents", "停止原因: completed"]
     assert errors == []
-    assert provider.requests[0][0][0].content == "Read README.md"
+    assert provider.requests[0][0][0].role == "system"
+    assert provider.requests[0][0][1].content == "Read README.md"
 
 
 def test_cli_prompts_for_task_when_argument_is_omitted(tmp_path: Path) -> None:
@@ -57,7 +152,7 @@ def test_cli_prompts_for_task_when_argument_is_omitted(tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert prompts == ["任务: "]
-    assert output == ["Done"]
+    assert output == ["Done", "停止原因: completed"]
 
 
 def test_cli_reports_max_steps_without_requesting_another_response(tmp_path: Path) -> None:
@@ -245,7 +340,7 @@ def test_cli_executes_approved_command_with_configured_limits(tmp_path: Path) ->
     assert payload["stdout"].strip() == "command output"
     assert any("Timeout seconds: 2.0" in message for message in output)
     assert any("Combined output limit bytes: 1024" in message for message in output)
-    assert output[-1] == "命令已完成。"
+    assert output[-2:] == ["命令已完成。", "停止原因: completed"]
 
 
 def test_cli_does_not_expose_run_command_without_allow_exec(tmp_path: Path) -> None:
@@ -411,7 +506,7 @@ def test_cli_approves_write_and_edit_as_separate_operations(tmp_path: Path) -> N
     assert json.loads(first_tool_message.content)["status"] == "created"
     assert json.loads(second_tool_message.content)["status"] == "edited"
     assert any("Path: program.py" in message for message in output)
-    assert output[-1] == "文件已创建并修改。"
+    assert output[-2:] == ["文件已创建并修改。", "停止原因: completed"]
 
 
 def test_cli_default_input_rejects_redirected_approval(
