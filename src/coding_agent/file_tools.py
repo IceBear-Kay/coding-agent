@@ -14,6 +14,7 @@ from pathlib import Path, PureWindowsPath
 from pydantic import BaseModel, ConfigDict, Field
 
 from coding_agent.approval import ApprovalCallback, ApprovalRequest, request_approval
+from coding_agent.command_tools import CommandLimits, run_command_tool_spec
 from coding_agent.tools import (
     ToolOutput,
     ToolRegistry,
@@ -580,13 +581,23 @@ def create_workspace_registry(
     workspace: Workspace,
     *,
     allow_write: bool = False,
+    allow_exec: bool = False,
     approval_callback: ApprovalCallback | None = None,
+    command_limits: CommandLimits | None = None,
 ) -> ToolRegistry:
-    """Create the standard registry, optionally exposing approved file mutations."""
+    """Create the standard registry with explicitly enabled side-effect tools."""
     registry = create_read_only_registry(workspace)
     if allow_write:
         registry.register(write_file_tool_spec(workspace, approval_callback))
         registry.register(edit_file_tool_spec(workspace, approval_callback))
+    if allow_exec:
+        registry.register(
+            run_command_tool_spec(
+                workspace,
+                approval_callback,
+                limits=command_limits,
+            )
+        )
     return registry
 
 

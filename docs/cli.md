@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`coding-agent` 每次运行处理一个任务。默认只提供工作区内的 `list_files` 和 `read_file`；显式使用 `--allow-write` 后，模型才可以申请调用 `write_file` 和 `edit_file`。
+`coding-agent` 每次运行处理一个任务。默认只提供工作区内的 `list_files` 和 `read_file`；显式使用 `--allow-write` 后，模型才可以申请调用 `write_file` 和 `edit_file`，显式使用 `--allow-exec` 后才可以申请调用 `run_command`。
 
 ## 直接运行
 
@@ -30,7 +30,7 @@ uv run coding-agent "请创建 hello.py，输出 Hello, world!" --workspace . --
 批准本次操作？[y/N]:
 ```
 
-只有在交互终端中输入 `y` 或 `yes` 才批准本次操作。空输入、其他回答、无法读取输入以及管道或重定向的非交互输入均视为拒绝；`Ctrl+C` 会中断整个任务并返回退出码 130。`--allow-write` 只负责向模型开放工具，不会自动批准任何操作。
+只有在交互终端中输入 `y` 或 `yes` 才批准本次操作。空输入、其他回答、无法读取输入以及管道或重定向的非交互输入均视为拒绝；`Ctrl+C` 会中断整个任务并返回退出码 130。`--allow-write` 和 `--allow-exec` 只负责向模型开放对应工具，不会自动批准任何操作。
 
 - `write_file` 只创建新文件，不覆盖任何已有文件或目录。
 - `edit_file` 要求 `old_text` 非空且在原文件中恰好出现一次，重叠位置也计为多次；不执行模糊、正则或隐式多处替换。
@@ -38,7 +38,25 @@ uv run coding-agent "请创建 hello.py，输出 Hello, world!" --workspace . --
 - `.git`、`.local`、`.venv`、真实 `.env`、路径逃逸、符号链接、junction/reparse point 和危险 Windows 特殊路径会被拒绝。
 - 审批后会重新核对目标；文件被修改、删除或替换时返回冲突，不套用过期操作。
 
-当前版本不执行本地命令、不删除文件，也不提供自动审批。路径检查和逐次确认用于降低误操作风险，不等同于操作系统沙箱。
+## 经审批的本地命令
+
+需要运行生成的程序时，同时开放文件修改和本地命令工具：
+
+```powershell
+uv run coding-agent "请创建 solution.py，读取两个整数并输出它们的和，然后用输入 7 5 运行验证" --workspace . --allow-write --allow-exec --command-timeout 10 --command-output-limit 65536 --max-steps 8
+```
+
+模型调用 `run_command` 时提供结构化 `argv`、工作区内的 `cwd` 和独立 `stdin` 文本。程序不会把参数拼成 Shell 命令，也不会自动解释管道、重定向或 `&` 等字符。`python` 会解析为当前 uv 环境实际使用的 Python 3.12 解释器。审批界面会显示解析后的完整参数、工作目录、stdin、超时和输出上限；只有批准后才启动进程，批准后还会重新核对命令与工作目录。
+
+子进程结束后，工具以 JSON 返回 `stdout`、`stderr`、`exit_code`、`status`、执行耗时和 `truncated`，Agent Loop 再把该工具结果交回模型。`completed` 表示进程以退出码 0 结束，不表示生成的算法已经通过其他测试；非零退出返回 `failed`，超时返回 `timeout`，stdout/stderr 合计超过上限返回 `output_limit`。
+
+- `--command-timeout` 默认 10 秒，可设置为大于 0 且不超过 60 的有限数值。
+- `--command-output-limit` 默认 65536 字节，可设置为 1 至 1048576；stdout 和 stderr 共享该预算，达到上限时从读取阶段停止进程并标记截断。
+- stdin、stdout 和 stderr 与审批终端输入彼此独立；stdin 写完后关闭，空字符串表示立即发送 EOF。
+- 子进程使用最小化环境，不继承 DeepSeek、AWS 等凭据；`cwd` 必须是工作区内不经过符号链接或 reparse point 的已有目录。
+- 超时、输出超限或 `Ctrl+C` 时会清理普通进程树。Windows 使用 Job Object，Linux 使用独立进程组。
+
+当前版本不删除文件，也不提供自动审批。经批准的本地程序仍以当前用户权限运行，可以读写该用户有权访问的位置；`cwd` 限制、参数校验和进程清理用于降低误操作风险，不构成操作系统沙箱，也不保证约束刻意脱离进程组或改变权限的恶意程序。
 
 ## Provider 配置
 
@@ -46,7 +64,7 @@ uv run coding-agent "请创建 hello.py，输出 Hello, world!" --workspace . --
 
 `--max-steps` 限制一次运行的 Provider 调用次数，临时错误重试也计入该上限。`--max-retries` 设置每次临时错误最多重试次数。
 
-CLI 会以非零退出码报告 `max_steps`、`interrupted`、Provider 错误和非正常模型停止原因；不会自动批准文件修改，也不会执行命令工具。
+CLI 会以非零退出码报告 `max_steps`、`interrupted`、Provider 错误和非正常模型停止原因；文件修改和本地命令均不会自动批准。工具执行错误会作为结构化结果交回模型，由模型决定是否说明、修正参数或结束任务，不会自动重试副作用命令。
 
 ## 可选的真实 DeepSeek 手工验证
 
@@ -60,4 +78,4 @@ uv run coding-agent "请读取 docs/architecture.md 并列出 Agent Loop 的停�
 
 预期结果是模型先请求 `read_file`，程序在本地读取该文件并将结果回传，随后模型输出最终回答；若模型直接回答，则不会产生工具消息。达到 `max_steps`、网络失败或按下 `Ctrl+C` 时，CLI 应显示对应停止原因并返回非零退出码。
 
-真实写入验证必须由用户明确决定，并增加 `--allow-write`。在审批提示出现后，应先核对完整预览，再决定是否输入 `y`；不确认时直接按回车即可拒绝。自动测试使用 `FakeProvider` 和临时目录，不需要真实 API，也不会产生模型费用。
+真实写入或命令验证必须由用户明确决定，并增加对应的 `--allow-write` 或 `--allow-exec`。这会调用真实模型并产生 API 费用；在审批提示出现后，应先核对完整预览，再决定是否输入 `y`，不确认时直接按回车即可拒绝。自动测试使用 `FakeProvider`、无害的短 Python 进程和临时目录，不需要真实 API，也不会产生模型费用。

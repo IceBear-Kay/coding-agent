@@ -8,6 +8,11 @@ from typing import Any
 
 from coding_agent.agent import COMPLETED_STOP_REASON, DEFAULT_MAX_STEPS, AgentLoop, AgentRunResult
 from coding_agent.approval import ApprovalRequest
+from coding_agent.command_tools import (
+    DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES,
+    DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    CommandLimits,
+)
 from coding_agent.config import ProviderConfig
 from coding_agent.errors import ProviderError
 from coding_agent.file_tools import create_workspace_registry
@@ -46,6 +51,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-write",
         action="store_true",
         help="允许模型申请创建或精确修改文件；每次操作仍需确认。",
+    )
+    parser.add_argument(
+        "--allow-exec",
+        action="store_true",
+        help="允许模型申请执行本地命令；每次操作仍需确认。",
+    )
+    parser.add_argument(
+        "--command-timeout",
+        type=float,
+        default=DEFAULT_COMMAND_TIMEOUT_SECONDS,
+        help=f"run_command 最大执行时间（默认：{DEFAULT_COMMAND_TIMEOUT_SECONDS} 秒）。",
+    )
+    parser.add_argument(
+        "--command-output-limit",
+        type=_positive_int,
+        default=DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES,
+        help=(
+            "run_command stdout/stderr 合计字节上限"
+            f"（默认：{DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES}）。"
+        ),
     )
     parser.add_argument(
         "--max-steps",
@@ -150,6 +175,10 @@ def main(
             return 2
 
         workspace = Workspace(args.workspace)
+        command_limits = CommandLimits(
+            timeout_seconds=args.command_timeout,
+            output_limit_bytes=args.command_output_limit,
+        )
 
         def approve_operation(request: ApprovalRequest) -> bool:
             return _prompt_for_approval(
@@ -161,7 +190,9 @@ def main(
         registry = create_workspace_registry(
             workspace,
             allow_write=args.allow_write,
-            approval_callback=approve_operation if args.allow_write else None,
+            allow_exec=args.allow_exec,
+            approval_callback=approve_operation if (args.allow_write or args.allow_exec) else None,
+            command_limits=command_limits,
         )
         selected_provider = provider if provider is not None else _default_provider()
         result = AgentLoop(

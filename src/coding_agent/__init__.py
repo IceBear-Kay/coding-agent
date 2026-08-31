@@ -12,6 +12,14 @@ from coding_agent.agent import (
     AgentRunResult,
 )
 from coding_agent.approval import ApprovalCallback, ApprovalRequest, request_approval
+from coding_agent.command_tools import (
+    DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES,
+    DEFAULT_COMMAND_TIMEOUT_SECONDS,
+    CommandLimits,
+    LocalCommandRunner,
+    RunCommandArguments,
+    run_command_tool_spec,
+)
 from coding_agent.config import ProviderConfig
 from coding_agent.file_tools import (
     DEFAULT_MAX_FILE_BYTES,
@@ -66,11 +74,14 @@ __all__ = [
     "DEFAULT_MAX_OUTPUT_CHARS",
     "DEFAULT_MAX_SCAN_ENTRIES",
     "DEFAULT_MAX_STEPS",
+    "DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES",
+    "DEFAULT_COMMAND_TIMEOUT_SECONDS",
     "EditFileArguments",
     "FATAL_ERROR_STOP_REASON",
     "FakeProvider",
     "INTERRUPTED_STOP_REASON",
     "ListFilesArguments",
+    "LocalCommandRunner",
     "LIST_TRUNCATION_MARKER",
     "MAX_STEPS_STOP_REASON",
     "Message",
@@ -80,6 +91,7 @@ __all__ = [
     "ProviderConfig",
     "PROVIDER_ERROR_STOP_REASON",
     "ReadFileArguments",
+    "RunCommandArguments",
     "ToolCall",
     "ToolDispatcher",
     "ToolOutput",
@@ -96,10 +108,12 @@ __all__ = [
     "WorkspacePathError",
     "WorkspaceTraversalError",
     "WriteFileArguments",
+    "CommandLimits",
     "create_read_only_registry",
     "create_workspace_registry",
     "edit_file_tool_spec",
     "read_only_tool_specs",
     "request_approval",
+    "run_command_tool_spec",
     "write_file_tool_spec",
 ]
