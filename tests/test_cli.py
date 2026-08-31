@@ -194,6 +194,157 @@ def test_cli_defaults_to_read_only_tools_even_if_model_requests_write(tmp_path: 
     assert "Unknown tool" in tool_message.content
 
 
+def test_cli_executes_approved_command_with_configured_limits(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_run",
+                        name="run_command",
+                        arguments={
+                            "argv": ["python", "-c", "print('command output')"],
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="命令已完成。", finish_reason="stop"),
+        ]
+    )
+    output: list[str] = []
+
+    exit_code = main(
+        [
+            "Run a short Python command",
+            "--workspace",
+            str(tmp_path),
+            "--allow-exec",
+            "--command-timeout",
+            "2",
+            "--command-output-limit",
+            "1024",
+            "--max-steps",
+            "3",
+        ],
+        provider=provider,
+        input_fn=lambda _: "y",
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
+        "list_files",
+        "read_file",
+        "run_command",
+    ]
+    tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
+    payload = json.loads(tool_message.content)
+    assert payload["status"] == "completed"
+    assert payload["exit_code"] == 0
+    assert payload["stdout"].strip() == "command output"
+    assert any("Timeout seconds: 2.0" in message for message in output)
+    assert any("Combined output limit bytes: 1024" in message for message in output)
+    assert output[-1] == "命令已完成。"
+
+
+def test_cli_does_not_expose_run_command_without_allow_exec(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_run",
+                        name="run_command",
+                        arguments={"argv": ["python", "-c", "print('not run')"]},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="命令不可用。", finish_reason="stop"),
+        ]
+    )
+
+    exit_code = main(
+        ["Run a command", "--workspace", str(tmp_path)],
+        provider=provider,
+        input_fn=lambda _: "y",
+    )
+
+    assert exit_code == 0
+    assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
+        "list_files",
+        "read_file",
+    ]
+    tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
+    assert "Unknown tool" in tool_message.content
+
+
+def test_cli_rejects_invalid_command_limits_before_provider_call(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    errors: list[str] = []
+
+    exit_code = main(
+        [
+            "Run a command",
+            "--workspace",
+            str(tmp_path),
+            "--allow-exec",
+            "--command-timeout",
+            "61",
+        ],
+        provider=provider,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 2
+    assert provider.requests == []
+    assert "timeout_seconds" in errors[0]
+
+
+def test_cli_default_input_rejects_redirected_command_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_run",
+                        name="run_command",
+                        arguments={
+                            "argv": [
+                                "python",
+                                "-c",
+                                "open('not-created.txt', 'w').write('unexpected')",
+                            ]
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="命令已拒绝。", finish_reason="stop"),
+        ]
+    )
+    redirected_input = StringIO("y\n")
+    output: list[str] = []
+    monkeypatch.setattr(sys, "stdin", redirected_input)
+
+    exit_code = main(
+        ["Run a command", "--workspace", str(tmp_path), "--allow-exec"],
+        provider=provider,
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert redirected_input.tell() == 0
+    assert not (tmp_path / "not-created.txt").exists()
+    assert "审批结果: 已拒绝（非交互输入不能用于审批）" in output
+    tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
+    assert json.loads(tool_message.content)["status"] == "denied"
+
+
 def test_cli_approves_write_and_edit_as_separate_operations(tmp_path: Path) -> None:
     provider = FakeProvider(
         [
