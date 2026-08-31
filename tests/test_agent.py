@@ -3,11 +3,15 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from coding_agent import (
+    AgentEvent,
     AgentLoop,
     AgentState,
+    ApprovalRequest,
+    CommandLimits,
     FakeProvider,
     Message,
     ModelResponse,
@@ -15,10 +19,12 @@ from coding_agent import (
     Workspace,
     create_workspace_registry,
 )
+from coding_agent.config import ProviderConfig
 from coding_agent.errors import (
     ProviderAuthenticationError,
     ProviderNetworkError,
 )
+from coding_agent.provider import OpenAICompatibleProvider
 
 
 class ScriptedProvider:
@@ -102,6 +108,44 @@ def test_agent_loop_runs_tool_then_returns_final_answer(tmp_path: Path) -> None:
     assert provider.requests[0][0] == result.state.messages[:1]
 
 
+def test_agent_loop_emits_real_tool_events_in_dispatch_order(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("Project contents", encoding="utf-8")
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_readme",
+                        name="read_file",
+                        arguments={"path": "README.md"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="Done", finish_reason="stop"),
+        ]
+    )
+    events: list[AgentEvent] = []
+
+    result = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        event_callback=events.append,
+    ).run("Read README.md.")
+
+    assert result.stop_reason == "completed"
+    assert [event.kind for event in events] == ["tool_call", "tool_result"]
+    assert events[0].tool_call == ToolCall(
+        id="call_readme",
+        name="read_file",
+        arguments={"path": "README.md"},
+    )
+    assert events[1].tool_result is not None
+    assert events[1].tool_name == "read_file"
+    assert events[1].tool_result.tool_call_id == "call_readme"
+    assert events[1].tool_result.content == "Project contents"
+
+
 def test_agent_loop_round_trips_approved_file_result(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path)
     registry = create_workspace_registry(
@@ -134,6 +178,305 @@ def test_agent_loop_round_trips_approved_file_result(tmp_path: Path) -> None:
     tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
     assert tool_message.tool_call_id == "call_write"
     assert json.loads(tool_message.content)["status"] == "created"
+
+
+def test_agent_loop_completes_real_coding_repair_cycle(tmp_path: Path) -> None:
+    (tmp_path / "problem.txt").write_text(
+        "Read two integers and print their sum.",
+        encoding="utf-8",
+    )
+    workspace = Workspace(tmp_path)
+    approvals: list[ApprovalRequest] = []
+
+    def approve(request: ApprovalRequest) -> bool:
+        approvals.append(request)
+        return True
+
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        allow_exec=True,
+        approval_callback=approve,
+        command_limits=CommandLimits(timeout_seconds=2),
+    )
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                reasoning_content="先读取题目。",
+                tool_calls=[
+                    ToolCall(
+                        id="call_read_problem",
+                        name="read_file",
+                        arguments={"path": "problem.txt"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write_solution",
+                        name="write_file",
+                        arguments={
+                            "path": "solution.py",
+                            "content": "import sys\nprint(unknown_name)\n",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_run_bad",
+                        name="run_command",
+                        arguments={
+                            "argv": ["python", "solution.py"],
+                            "stdin": "1 2\n",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_edit_solution",
+                        name="edit_file",
+                        arguments={
+                            "path": "solution.py",
+                            "old_text": "unknown_name",
+                            "new_text": "sum(map(int, input().split()))",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_run_fixed",
+                        name="run_command",
+                        arguments={
+                            "argv": ["python", "solution.py"],
+                            "stdin": "1 2\n",
+                        },
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="程序已修正并通过样例。", finish_reason="stop"),
+        ]
+    )
+
+    result = AgentLoop(provider, workspace, registry=registry, max_steps=8).run(
+        "读取题目，编写程序并运行样例；如果失败就修正后再次运行。"
+    )
+
+    assert result.answer == "程序已修正并通过样例。"
+    assert result.stop_reason == "completed"
+    assert (tmp_path / "solution.py").read_text(encoding="utf-8") == (
+        "import sys\nprint(sum(map(int, input().split())))\n"
+    )
+    assert [request.operation for request in approvals] == [
+        "write_file",
+        "run_command",
+        "edit_file",
+        "run_command",
+    ]
+    failed_run = next(
+        message for message in provider.requests[3][0] if message.tool_call_id == "call_run_bad"
+    )
+    failed_payload = json.loads(failed_run.content)
+    assert failed_payload["status"] == "failed"
+    assert "NameError" in failed_payload["stderr"]
+    fixed_run = next(
+        message for message in provider.requests[5][0] if message.tool_call_id == "call_run_fixed"
+    )
+    fixed_payload = json.loads(fixed_run.content)
+    assert fixed_payload["status"] == "completed"
+    assert fixed_payload["stdout"].strip() == "3"
+    assert provider.requests[3][0][-1].tool_call_id == "call_run_bad"
+    assert provider.requests[5][0][-1].tool_call_id == "call_run_fixed"
+
+
+def test_agent_loop_rejection_has_no_side_effect_and_returns_to_model(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+    approvals: list[ApprovalRequest] = []
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        approval_callback=lambda request: approvals.append(request) or False,
+    )
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_denied_write",
+                        name="write_file",
+                        arguments={"path": "denied.py", "content": "print(1)\n"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="用户拒绝了写入。", finish_reason="stop"),
+        ]
+    )
+
+    result = AgentLoop(provider, workspace, registry=registry).run("创建 denied.py。")
+
+    assert result.answer == "用户拒绝了写入。"
+    assert not (tmp_path / "denied.py").exists()
+    assert [request.operation for request in approvals] == ["write_file"]
+    denied_message = provider.requests[1][0][-1]
+    assert json.loads(denied_message.content)["status"] == "denied"
+    assert denied_message.tool_call_id == "call_denied_write"
+
+
+def test_agent_loop_transient_retry_does_not_repeat_completed_write(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        approval_callback=lambda _: True,
+    )
+    provider = ScriptedProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write_once",
+                        name="write_file",
+                        arguments={"path": "once.py", "content": "print(1)\n"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ProviderNetworkError("temporary after write"),
+            ModelResponse(text="写入已完成。", finish_reason="stop"),
+        ]
+    )
+
+    result = AgentLoop(
+        provider,
+        workspace,
+        registry=registry,
+        max_steps=4,
+        max_retries=1,
+    ).run("创建 once.py。")
+
+    assert result.stop_reason == "completed"
+    assert (tmp_path / "once.py").read_text(encoding="utf-8") == "print(1)\n"
+    assert len(provider.requests) == 3
+    assert provider.requests[1][0] == provider.requests[2][0]
+
+
+def test_agent_loop_returns_real_command_timeout_to_provider(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+    registry = create_workspace_registry(
+        workspace,
+        allow_exec=True,
+        approval_callback=lambda _: True,
+        command_limits=CommandLimits(timeout_seconds=0.1),
+    )
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_timeout",
+                        name="run_command",
+                        arguments={"argv": ["python", "-c", "import time; time.sleep(3)"]},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="命令超时，任务未完成。", finish_reason="stop"),
+        ]
+    )
+
+    result = AgentLoop(provider, workspace, registry=registry, max_steps=3).run("运行一个短命令。")
+
+    assert result.stop_reason == "completed"
+    timeout_message = provider.requests[1][0][-1]
+    assert json.loads(timeout_message.content)["status"] == "timeout"
+    assert timeout_message.tool_call_id == "call_timeout"
+
+
+def test_agent_loop_with_openai_provider_round_trips_tool_protocol(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("协议测试", encoding="utf-8")
+    request_bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        request_bodies.append(body)
+        if len(request_bodies) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "reasoning_content": "读取 README。",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_http_read",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "read_file",
+                                            "arguments": '{"path":"README.md"}',
+                                        },
+                                    }
+                                ],
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "协议闭环完成。"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    config = ProviderConfig(
+        api_key="test-key",
+        base_url="https://api.example.com/v1",
+        model="test-model",
+        timeout_seconds=5,
+    )
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(config, client)
+        result = AgentLoop(
+            provider,
+            Workspace(tmp_path),
+            system_prompt="通用测试策略",
+        ).run("读取 README.md。")
+
+    assert result.answer == "协议闭环完成。"
+    assert result.stop_reason == "completed"
+    assert request_bodies[0]["messages"][0] == {"role": "system", "content": "通用测试策略"}
+    assert request_bodies[1]["messages"][1]["role"] == "user"
+    assistant_message = request_bodies[1]["messages"][2]
+    assert assistant_message["reasoning_content"] == "读取 README。"
+    assert assistant_message["tool_calls"][0]["id"] == "call_http_read"
+    assert assistant_message["tool_calls"][0]["function"]["arguments"] == '{"path":"README.md"}'
+    tool_message = request_bodies[1]["messages"][3]
+    assert tool_message == {
+        "role": "tool",
+        "content": "协议测试",
+        "tool_call_id": "call_http_read",
+    }
 
 
 def test_agent_loop_stops_at_max_steps_after_executing_tool(tmp_path: Path) -> None:

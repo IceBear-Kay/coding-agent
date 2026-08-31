@@ -1,12 +1,20 @@
 """Command-line entry point for one coding-agent task."""
 
 import argparse
+import json
 import sys
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from typing import Any
 
-from coding_agent.agent import COMPLETED_STOP_REASON, DEFAULT_MAX_STEPS, AgentLoop, AgentRunResult
+from coding_agent.agent import (
+    COMPLETED_STOP_REASON,
+    DEFAULT_MAX_STEPS,
+    DEFAULT_SYSTEM_PROMPT,
+    AgentEvent,
+    AgentLoop,
+    AgentRunResult,
+)
 from coding_agent.approval import ApprovalRequest
 from coding_agent.command_tools import (
     DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES,
@@ -110,12 +118,59 @@ def _report_result(
         output_fn(result.answer)
 
     if result.stop_reason == COMPLETED_STOP_REASON:
+        output_fn(f"停止原因: {result.stop_reason}")
         return 0
 
     error_text = str(result.error) if result.error is not None else ""
     detail = f"：{error_text}" if error_text else ""
     error_fn(f"停止原因: {result.stop_reason}{detail}")
     return 130 if result.stop_reason == "interrupted" else 1
+
+
+def _report_event(event: AgentEvent, output_fn: Callable[[str], Any]) -> None:
+    """Render only concise facts from real tool calls and structured results."""
+    if event.kind == "tool_call" and event.tool_call is not None:
+        tool_call = event.tool_call
+        details = _tool_call_summary(tool_call.name, tool_call.arguments)
+        suffix = f"，{details}" if details else ""
+        output_fn(f"工具调用: {tool_call.name} ({tool_call.id}){suffix}")
+        return
+
+    if event.kind == "tool_result" and event.tool_result is not None:
+        result = event.tool_result
+        status, details = _tool_result_summary(result.content)
+        detail_text = f"，{details}" if details else ""
+        error_text = "，错误" if result.is_error else ""
+        tool_name = f" {event.tool_name}" if event.tool_name else ""
+        output_fn(f"工具结果{tool_name}: {status or '已返回'}{error_text}{detail_text}")
+
+
+def _tool_call_summary(tool_name: str, arguments: dict[str, Any]) -> str:
+    if "path" in arguments and isinstance(arguments["path"], str):
+        return f"路径: {arguments['path']}"
+    if tool_name == "run_command":
+        argv = arguments.get("argv")
+        cwd = arguments.get("cwd", ".")
+        if isinstance(argv, list):
+            return f"argv: {json.dumps(argv, ensure_ascii=False)}，cwd: {cwd}"
+    return ""
+
+
+def _tool_result_summary(content: str) -> tuple[str | None, str | None]:
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+
+    status = payload.get("status") if isinstance(payload.get("status"), str) else None
+    fields: list[str] = []
+    for name in ("path", "exit_code", "truncated", "bytes_written", "replacements"):
+        value = payload.get(name)
+        if value is not None:
+            fields.append(f"{name}: {value}")
+    return status, "，".join(fields) or None
 
 
 def _report_interrupt(error_fn: Callable[[str], Any]) -> None:
@@ -201,6 +256,8 @@ def main(
             registry=registry,
             max_steps=args.max_steps,
             max_retries=args.max_retries,
+            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            event_callback=lambda event: _report_event(event, output_fn),
         ).run(task)
         return _report_result(result, output_fn, report_error)
     except KeyboardInterrupt:
