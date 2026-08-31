@@ -39,6 +39,69 @@ def test_cli_parser_accepts_task_workspace_limits_and_tool_flags() -> None:
     assert args.max_retries == 0
 
 
+def test_cli_does_not_parse_read_file_json_as_execution_status(tmp_path: Path) -> None:
+    file_content = '{"status":"created","path":"never-created.py","exit_code":0}'
+    (tmp_path / "note.txt").write_text(file_content, encoding="utf-8")
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_read_json",
+                        name="read_file",
+                        arguments={"path": "note.txt"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="已读取文件。", finish_reason="stop"),
+        ]
+    )
+    output: list[str] = []
+
+    exit_code = main(
+        ["读取 note.txt", "--workspace", str(tmp_path)],
+        provider=provider,
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert output[1] == "工具结果 read_file: 已返回"
+    assert "never-created.py" not in output[1]
+    assert provider.requests[1][0][-1].content == file_content
+
+
+def test_cli_handles_large_integer_read_file_content_without_aborting(tmp_path: Path) -> None:
+    file_content = "9" * 5_000
+    (tmp_path / "numbers.txt").write_text(file_content, encoding="utf-8")
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_read_large",
+                        name="read_file",
+                        arguments={"path": "numbers.txt"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="已读取长数字文本。", finish_reason="stop"),
+        ]
+    )
+
+    output: list[str] = []
+    exit_code = main(
+        ["读取 numbers.txt", "--workspace", str(tmp_path)],
+        provider=provider,
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert output[-2:] == ["已读取长数字文本。", "停止原因: completed"]
+    assert provider.requests[1][0][-1].content == file_content
+
+
 def test_cli_runs_injected_provider_and_passes_workspace_and_task(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("Project contents", encoding="utf-8")
     provider = FakeProvider(

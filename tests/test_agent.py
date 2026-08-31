@@ -146,6 +146,54 @@ def test_agent_loop_emits_real_tool_events_in_dispatch_order(tmp_path: Path) -> 
     assert events[1].tool_result.content == "Project contents"
 
 
+def test_agent_loop_records_tool_result_before_result_event_interrupt(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        approval_callback=lambda _: True,
+    )
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_interrupted_write",
+                        name="write_file",
+                        arguments={"path": "created.txt", "content": "saved\n"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="这一步不应被请求。", finish_reason="stop"),
+        ]
+    )
+    events: list[AgentEvent] = []
+
+    def interrupt_after_result(event: AgentEvent) -> None:
+        events.append(event)
+        if event.kind == "tool_result":
+            raise KeyboardInterrupt
+
+    result = AgentLoop(
+        provider,
+        workspace,
+        registry=registry,
+        event_callback=interrupt_after_result,
+    ).run("创建 created.txt。")
+
+    assert result.stop_reason == "interrupted"
+    assert isinstance(result.error, KeyboardInterrupt)
+    assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "saved\n"
+    assert result.state.messages[-1] == Message(
+        role="tool",
+        tool_call_id="call_interrupted_write",
+        content='{"bytes_written":6,"path":"created.txt","status":"created"}',
+    )
+    assert [event.kind for event in events] == ["tool_call", "tool_result"]
+    assert len(provider.requests) == 1
+
+
 def test_agent_loop_round_trips_approved_file_result(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path)
     registry = create_workspace_registry(
@@ -477,6 +525,193 @@ def test_agent_loop_with_openai_provider_round_trips_tool_protocol(tmp_path: Pat
         "content": "协议测试",
         "tool_call_id": "call_http_read",
     }
+
+
+def test_openai_provider_round_trips_side_effect_tools_and_actual_outputs(
+    tmp_path: Path,
+) -> None:
+    request_bodies: list[dict[str, Any]] = []
+    tool_steps = [
+        (
+            "call_http_write",
+            "write_file",
+            {"path": "answer.py", "content": "print(0)\n"},
+            "创建初始程序。",
+        ),
+        (
+            "call_http_run_wrong",
+            "run_command",
+            {"argv": ["python", "answer.py"], "cwd": ".", "stdin": ""},
+            "执行样例并读取实际输出。",
+        ),
+        (
+            "call_http_edit",
+            "edit_file",
+            {"path": "answer.py", "old_text": "print(0)", "new_text": "print(7)"},
+            "退出码为零但答案不是预期值，进行精确修正。",
+        ),
+        (
+            "call_http_run_fixed",
+            "run_command",
+            {"argv": ["python", "answer.py"], "cwd": ".", "stdin": ""},
+            "再次运行并确认实际输出。",
+        ),
+    ]
+
+    def response_for_tool(
+        call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        reasoning_content: str,
+    ) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "reasoning_content": reasoning_content,
+                            "tool_calls": [
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": json.dumps(
+                                            arguments,
+                                            ensure_ascii=False,
+                                            separators=(",", ":"),
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_bodies.append(json.loads(request.content))
+        response_index = len(request_bodies) - 1
+        if response_index < len(tool_steps):
+            call_id, tool_name, arguments, reasoning_content = tool_steps[response_index]
+            return response_for_tool(call_id, tool_name, arguments, reasoning_content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "已根据实际输出修正并确认答案为 7。",
+                            "reasoning_content": "实际输出已经等于预期值。",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        )
+
+    config = ProviderConfig(
+        api_key="test-key",
+        base_url="https://api.example.com/v1",
+        model="test-model",
+        timeout_seconds=5,
+    )
+    workspace = Workspace(tmp_path)
+    approvals: list[ApprovalRequest] = []
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        allow_exec=True,
+        approval_callback=lambda request: approvals.append(request) or True,
+        command_limits=CommandLimits(timeout_seconds=2),
+    )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(config, client)
+        result = AgentLoop(
+            provider,
+            workspace,
+            registry=registry,
+            system_prompt="通用测试策略",
+            max_steps=8,
+        ).run("创建程序，比较实际输出并修正到预期答案 7。")
+
+    assert result.answer == "已根据实际输出修正并确认答案为 7。"
+    assert result.stop_reason == "completed"
+    assert (tmp_path / "answer.py").read_text(encoding="utf-8") == "print(7)\n"
+    assert [request.operation for request in approvals] == [
+        "write_file",
+        "run_command",
+        "edit_file",
+        "run_command",
+    ]
+    assert len(request_bodies) == 5
+
+    schema_names = {tool["function"]["name"] for tool in request_bodies[0]["tools"]}
+    assert schema_names == {
+        "list_files",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "run_command",
+    }
+
+    for body, (_, _, _, expected_reasoning) in zip(request_bodies[1:5], tool_steps, strict=True):
+        assistant_messages = [
+            message for message in body["messages"] if message["role"] == "assistant"
+        ]
+        assert assistant_messages[-1]["reasoning_content"] == expected_reasoning
+
+    expected_arguments = [arguments for _, _, arguments, _ in tool_steps]
+    for index, (call_id, _, arguments, _) in enumerate(tool_steps, start=1):
+        assistant_message = next(
+            message
+            for message in request_bodies[index]["messages"]
+            if message.get("role") == "assistant"
+            and message.get("tool_calls")
+            and message["tool_calls"][0]["id"] == call_id
+        )
+        assert assistant_message["tool_calls"][0]["function"]["arguments"] == json.dumps(
+            arguments,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        tool_message = next(
+            message
+            for message in request_bodies[index]["messages"]
+            if message.get("tool_call_id") == call_id
+        )
+        payload = json.loads(tool_message["content"])
+        assert tool_message["role"] == "tool"
+        assert payload["status"] in {"created", "completed", "edited"}
+
+    first_run_payload = json.loads(
+        next(
+            message
+            for message in request_bodies[2]["messages"]
+            if message.get("tool_call_id") == "call_http_run_wrong"
+        )["content"]
+    )
+    second_run_payload = json.loads(
+        next(
+            message
+            for message in request_bodies[4]["messages"]
+            if message.get("tool_call_id") == "call_http_run_fixed"
+        )["content"]
+    )
+    assert first_run_payload["status"] == "completed"
+    assert first_run_payload["exit_code"] == 0
+    assert first_run_payload["stdout"].strip() != "7"
+    assert second_run_payload["status"] == "completed"
+    assert second_run_payload["exit_code"] == 0
+    assert second_run_payload["stdout"].strip() == "7"
+    assert expected_arguments[0]["content"] == "print(0)\n"
 
 
 def test_agent_loop_stops_at_max_steps_after_executing_tool(tmp_path: Path) -> None:

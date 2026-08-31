@@ -27,6 +27,8 @@ from coding_agent.file_tools import create_workspace_registry
 from coding_agent.provider import ModelProvider, OpenAICompatibleProvider
 from coding_agent.tools import Workspace
 
+_STRUCTURED_RESULT_TOOLS = frozenset({"write_file", "edit_file", "run_command"})
+
 
 def _positive_int(value: str) -> int:
     try:
@@ -138,7 +140,7 @@ def _report_event(event: AgentEvent, output_fn: Callable[[str], Any]) -> None:
 
     if event.kind == "tool_result" and event.tool_result is not None:
         result = event.tool_result
-        status, details = _tool_result_summary(result.content)
+        status, details = _tool_result_summary(event.tool_name, result.content)
         detail_text = f"，{details}" if details else ""
         error_text = "，错误" if result.is_error else ""
         tool_name = f" {event.tool_name}" if event.tool_name else ""
@@ -156,10 +158,13 @@ def _tool_call_summary(tool_name: str, arguments: dict[str, Any]) -> str:
     return ""
 
 
-def _tool_result_summary(content: str) -> tuple[str | None, str | None]:
+def _tool_result_summary(tool_name: str | None, content: str) -> tuple[str | None, str | None]:
+    if tool_name not in _STRUCTURED_RESULT_TOOLS:
+        return None, None
+
     try:
         payload = json.loads(content)
-    except (TypeError, json.JSONDecodeError):
+    except (TypeError, ValueError, RecursionError):
         return None, None
     if not isinstance(payload, dict):
         return None, None

@@ -161,18 +161,18 @@ class AgentLoop:
                 for tool_call in response.tool_calls:
                     self._emit_event(AgentEvent(kind="tool_call", tool_call=tool_call))
                     tool_result = self.dispatcher.dispatch(tool_call)
-                    self._emit_event(
-                        AgentEvent(
-                            kind="tool_result",
-                            tool_result=tool_result,
-                            tool_name=tool_call.name,
-                        )
-                    )
                     state.messages.append(
                         Message(
                             role="tool",
                             tool_call_id=tool_call.id,
                             content=tool_result.content,
+                        )
+                    )
+                    self._emit_event(
+                        AgentEvent(
+                            kind="tool_result",
+                            tool_result=tool_result,
+                            tool_name=tool_call.name,
                         )
                     )
 
