@@ -77,7 +77,18 @@ uv run coding-agent "请创建 solution.py，读取两个整数并输出它们�
 
 ## Provider 配置
 
-未通过测试注入 Provider 时，CLI 从环境变量创建 DeepSeek Provider。运行前在当前终端设置 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 和 `DEEPSEEK_TIMEOUT_SECONDS`；不要把真实 Key 写入仓库或命令历史。
+未通过测试注入 Provider 时，CLI 从环境变量创建 DeepSeek Provider。仓库提供不含凭据的 `.env.example`，程序不会自动搜索或读取 `.env`；需要使用配置文件时，必须由 `uv` 显式加载：
+
+```powershell
+Copy-Item .env.example .env
+uv run --env-file .env coding-agent --help
+```
+
+也可以只在当前 PowerShell 会话中设置四项环境变量，再直接运行 `uv run coding-agent`。`DEEPSEEK_API_KEY` 不应写入命令历史、Issue、PR 或截图；需要隐藏输入时可使用 `Read-Host -AsSecureString` 后设置 `$env:DEEPSEEK_API_KEY`。这些环境变量只对当前会话及其子进程有效。
+
+当 `uv --env-file` 加载配置文件时，当前 PowerShell 中已经存在的同名环境变量优先于文件值。`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 和 `DEEPSEEK_TIMEOUT_SECONDS` 仍由 `ProviderConfig` 统一校验；缺失或无效时会指出变量名，不会输出配置值。
+
+`.env.example` 中的配置示例为：`DEEPSEEK_BASE_URL=https://api.deepseek.com`、`DEEPSEEK_MODEL=deepseek-v4-flash`、`DEEPSEEK_TIMEOUT_SECONDS=60`，`DEEPSEEK_API_KEY` 保持为空。真实 API Key 只应通过未跟踪的 `.env` 或当前会话的隐藏输入提供。
 
 `--max-steps` 限制一次运行的 Provider 调用次数，临时错误重试也计入该上限。`--max-retries` 设置每次临时错误最多重试次数。
 
