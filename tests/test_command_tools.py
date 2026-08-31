@@ -4,11 +4,13 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
+import coding_agent.command_tools as command_tools
 from coding_agent.approval import ApprovalRequest
 from coding_agent.command_tools import (
     DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES,
@@ -184,15 +186,14 @@ def test_run_command_approval_previews_exact_resolved_plan(tmp_path: Path) -> No
     assert result.is_error is False
     assert len(requests) == 1
     assert requests[0].operation == "run_command"
-    assert f"Argv: {json.dumps([str(Path(sys.executable).resolve()), 'script.py', 'a&b'])}" in (
-        requests[0].preview
-    )
+    python_launch_path = os.path.abspath(sys.executable)
+    assert f"Argv: {json.dumps([python_launch_path, 'script.py', 'a&b'])}" in (requests[0].preview)
     assert "Cwd: work dir" in requests[0].preview
     assert "Stdin bytes: 4" in requests[0].preview
     assert 'Stdin: "7 5\\n"' in requests[0].preview
     assert "Timeout seconds: 4.5" in requests[0].preview
     assert "Combined output limit bytes: 1234" in requests[0].preview
-    assert runner.plans[0].argv[0] == str(Path(sys.executable).resolve())
+    assert runner.plans[0].argv[0] == python_launch_path
     assert runner.plans[0].stdin == b"7 5\n"
 
 
@@ -310,7 +311,7 @@ def test_run_command_executes_real_python_with_stdin_and_both_output_streams(
     payload = json.loads(result.content)
     assert result.is_error is False
     assert payload["status"] == "completed"
-    assert payload["argv"][0] == str(Path(sys.executable).resolve())
+    assert payload["argv"][0] == os.path.abspath(sys.executable)
     assert payload["cwd"] == "."
     assert payload["exit_code"] == 0
     assert payload["stdout"] == f"HELLO{os.linesep}"
@@ -337,6 +338,46 @@ def test_run_command_closes_empty_stdin_and_child_observes_eof(tmp_path: Path) -
     assert payload["stdout"] == f"''{os.linesep}"
 
 
+def test_run_command_preserves_active_virtual_environment(tmp_path: Path) -> None:
+    result = dispatch_command(
+        Workspace(tmp_path),
+        {
+            "argv": [
+                "python",
+                "-c",
+                "import json, sys; print(json.dumps({'prefix': sys.prefix, "
+                "'executable': sys.executable}))",
+            ]
+        },
+        lambda _: True,
+    )
+
+    payload = json.loads(result.content)
+    child = json.loads(payload["stdout"])
+    assert result.is_error is False
+    assert Path(child["prefix"]).resolve() == Path(sys.prefix).resolve()
+    assert Path(payload["argv"][0]) == Path(os.path.abspath(sys.executable))
+
+
+def test_run_command_imports_installed_project_from_temporary_cwd(tmp_path: Path) -> None:
+    result = dispatch_command(
+        Workspace(tmp_path),
+        {
+            "argv": [
+                "python",
+                "-c",
+                "import coding_agent; from pathlib import Path; "
+                "print(Path(coding_agent.__file__).name)",
+            ]
+        },
+        lambda _: True,
+    )
+
+    payload = json.loads(result.content)
+    assert result.is_error is False
+    assert payload["stdout"] == f"__init__.py{os.linesep}"
+
+
 def test_run_command_preserves_chinese_utf8_output(tmp_path: Path) -> None:
     result = dispatch_command(
         Workspace(tmp_path),
@@ -349,6 +390,71 @@ def test_run_command_preserves_chinese_utf8_output(tmp_path: Path) -> None:
     payload = json.loads(result.content)
     assert result.is_error is False
     assert payload["stdout"] == f"你好，世界{os.linesep}"
+
+
+def test_run_command_does_not_count_idle_stream_reservations_as_output(tmp_path: Path) -> None:
+    output_size = 60 * 1024
+    result = dispatch_command(
+        Workspace(tmp_path),
+        {
+            "argv": [
+                "python",
+                "-c",
+                f"import sys, time; sys.stdout.buffer.write(b'x' * {output_size}); "
+                "sys.stdout.flush(); time.sleep(0.05)",
+            ]
+        },
+        lambda _: True,
+        limits=CommandLimits(timeout_seconds=2),
+    )
+
+    payload = json.loads(result.content)
+    assert result.is_error is False
+    assert payload["status"] == "completed"
+    assert len(payload["stdout"].encode()) == output_size
+    assert payload["stderr"] == ""
+    assert payload["truncated"] is False
+
+
+def test_run_command_stderr_alone_can_use_shared_output_budget(tmp_path: Path) -> None:
+    result = dispatch_command(
+        Workspace(tmp_path),
+        {"argv": ["python", "-c", "import os; os.write(2, b'e' * 10000)"]},
+        lambda _: True,
+        limits=CommandLimits(timeout_seconds=2, output_limit_bytes=256),
+    )
+
+    payload = json.loads(result.content)
+    assert result.is_error is True
+    assert payload["status"] == "output_limit"
+    assert payload["stdout"] == ""
+    assert 0 < len(payload["stderr"].encode()) <= 256
+    assert payload["truncated"] is True
+
+
+def test_run_command_bounds_concurrent_stdout_and_stderr(tmp_path: Path) -> None:
+    code = (
+        "import os, threading, time; "
+        "os.write(1, b'out-start\\n'); os.write(2, b'err-start\\n'); time.sleep(0.2); "
+        "threads = [threading.Thread(target=os.write, args=(1, b'o' * 10000)), "
+        "threading.Thread(target=os.write, args=(2, b'e' * 10000))]; "
+        "[thread.start() for thread in threads]; [thread.join() for thread in threads]"
+    )
+    result = dispatch_command(
+        Workspace(tmp_path),
+        {"argv": ["python", "-c", code]},
+        lambda _: True,
+        limits=CommandLimits(timeout_seconds=2, output_limit_bytes=512),
+    )
+
+    payload = json.loads(result.content)
+    buffered_bytes = len(payload["stdout"].encode()) + len(payload["stderr"].encode())
+    assert result.is_error is True
+    assert payload["status"] == "output_limit"
+    assert payload["stdout"].startswith("out-start\n")
+    assert payload["stderr"].startswith("err-start\n")
+    assert buffered_bytes <= 512
+    assert payload["truncated"] is True
 
 
 def test_run_command_stops_when_combined_output_reaches_limit(tmp_path: Path) -> None:
@@ -376,7 +482,7 @@ def test_run_command_stops_when_combined_output_reaches_limit(tmp_path: Path) ->
     assert "\ufffd" not in payload["stdout"] + payload["stderr"]
 
 
-def test_run_command_does_not_read_beyond_shared_output_budget(tmp_path: Path) -> None:
+def test_run_command_keeps_reads_and_buffers_bounded_after_output_limit(tmp_path: Path) -> None:
     class CountingStream:
         def __init__(self, data: bytes) -> None:
             self._data = data
@@ -425,7 +531,10 @@ def test_run_command_does_not_read_beyond_shared_output_budget(tmp_path: Path) -
 
     assert payload["status"] == "output_limit"
     assert process.killed is True
-    assert process.stdout.read_bytes + process.stderr.read_bytes <= 128
+    buffered_bytes = len(payload["stdout"].encode()) + len(payload["stderr"].encode())
+    read_bytes = process.stdout.read_bytes + process.stderr.read_bytes
+    assert buffered_bytes <= 128
+    assert read_bytes <= 128 + (2 * 128)
     assert all(size <= 128 for size in process.stdout.read_sizes + process.stderr.read_sizes)
 
 
@@ -539,6 +648,174 @@ def test_run_command_propagates_keyboard_interrupt_after_cleanup(tmp_path: Path)
     assert process.stdin.closed is True
     assert process.stdout.closed is True
     assert process.stderr.closed is True
+
+
+def test_run_command_cleans_process_when_thread_start_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes: list[subprocess.Popen[bytes]] = []
+
+    def recording_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        process = subprocess.Popen(*args, **kwargs)  # type: ignore[call-overload]
+        processes.append(process)
+        return process
+
+    def interrupt_start(_: threading.Thread) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(command_tools.threading.Thread, "start", interrupt_start)
+    plan = _prepare_command(
+        Workspace(tmp_path),
+        RunCommandArguments(argv=["python", "-c", "import time; time.sleep(30)"]),
+        CommandLimits(),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        LocalCommandRunner(popen_factory=recording_popen).run(plan)
+
+    process = processes[0]
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+
+
+def test_run_command_cleans_process_after_partial_thread_start_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processes: list[subprocess.Popen[bytes]] = []
+    original_start = threading.Thread.start
+    start_calls = 0
+
+    def recording_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        process = subprocess.Popen(*args, **kwargs)  # type: ignore[call-overload]
+        processes.append(process)
+        return process
+
+    def fail_second_start(thread: threading.Thread) -> None:
+        nonlocal start_calls
+        start_calls += 1
+        if start_calls == 2:
+            raise RuntimeError("reader thread failed to start")
+        original_start(thread)
+
+    monkeypatch.setattr(command_tools.threading.Thread, "start", fail_second_start)
+    plan = _prepare_command(
+        Workspace(tmp_path),
+        RunCommandArguments(argv=["python", "-c", "import time; time.sleep(30)"]),
+        CommandLimits(),
+    )
+
+    with pytest.raises(RuntimeError, match="reader thread failed to start"):
+        LocalCommandRunner(popen_factory=recording_popen).run(plan)
+
+    process = processes[0]
+    assert process.poll() is not None
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+    assert process.stderr is not None and process.stderr.closed
+
+
+def test_run_command_reports_cleanup_failure_without_blocking_on_active_pipes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BlockingStream:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def read(self, size: int) -> bytes:
+            time.sleep(3)
+            return b""
+
+        def close(self) -> None:
+            self.closed = True
+
+    class InputStream(BlockingStream):
+        def write(self, data: bytes) -> int:
+            return len(data)
+
+        def flush(self) -> None:
+            pass
+
+    class StuckProcess:
+        def __init__(self) -> None:
+            self.pid = 12345
+            self.stdout = BlockingStream()
+            self.stderr = BlockingStream()
+            self.stdin = InputStream()
+            self.returncode = None
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float) -> int:
+            raise subprocess.TimeoutExpired("stuck", timeout)
+
+        def kill(self) -> None:
+            raise PermissionError("parent kill denied")
+
+    def fail_tree_cleanup(_: object) -> None:
+        raise OSError("tree cleanup denied")
+
+    process = StuckProcess()
+    monkeypatch.setattr(command_tools, "_terminate_process_tree", fail_tree_cleanup)
+    started_at = time.monotonic()
+    result = LocalCommandRunner(popen_factory=lambda *args, **kwargs: process).run(
+        make_command_plan(tmp_path, CommandLimits(timeout_seconds=0.1))
+    )
+    elapsed = time.monotonic() - started_at
+    payload = json.loads(result.to_json())
+
+    assert payload["status"] == "cleanup_failed"
+    assert "tree cleanup denied" in payload["message"]
+    assert "active streams were left open" in payload["message"]
+    assert elapsed < 2
+    assert process.stdout.closed is False
+    assert process.stderr.closed is False
+
+
+def test_windows_fallback_reports_unconfirmed_process_tree_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        def __init__(self) -> None:
+            self.killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    process = Process()
+    monkeypatch.setattr(command_tools, "_resolve_taskkill", lambda: "taskkill.exe")
+    monkeypatch.setattr(
+        command_tools.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args=[], returncode=5),
+    )
+
+    with pytest.raises(OSError, match="taskkill.exe exited with code 5.*could not be confirmed"):
+        command_tools._terminate_windows_process_tree(process, 12345)  # type: ignore[arg-type]
+
+    assert process.killed is True
+
+
+def test_posix_cleanup_reports_group_and_parent_kill_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        def kill(self) -> None:
+            raise PermissionError("parent kill denied")
+
+    def fail_killpg(pid: int, sig: int) -> None:
+        raise PermissionError("group kill denied")
+
+    monkeypatch.setattr(command_tools.os, "killpg", fail_killpg, raising=False)
+    monkeypatch.setattr(command_tools.signal, "SIGKILL", 9, raising=False)
+
+    with pytest.raises(OSError, match="group kill denied.*parent kill denied"):
+        command_tools._terminate_posix_process_tree(Process(), 12345)  # type: ignore[arg-type]
 
 
 def test_run_command_returns_structured_launch_error(tmp_path: Path) -> None:

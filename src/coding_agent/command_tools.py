@@ -214,63 +214,78 @@ class LocalCommandRunner:
 
         started_at = self._clock()
         collector = _BoundedOutputCollector(plan.limits.output_limit_bytes)
-        controller = _ProcessController(process)
-        reader_threads = [
-            threading.Thread(
-                target=_read_output_stream,
-                args=(process.stdout, "stdout", collector, controller),
-                name="coding-agent-stdout-reader",
-                daemon=True,
-            ),
-            threading.Thread(
-                target=_read_output_stream,
-                args=(process.stderr, "stderr", collector, controller),
-                name="coding-agent-stderr-reader",
-                daemon=True,
-            ),
-        ]
-        stdin_thread = threading.Thread(
-            target=_write_stdin,
-            args=(process, plan.stdin),
-            name="coding-agent-stdin-writer",
-            daemon=True,
-        )
-        for thread in (*reader_threads, stdin_thread):
-            thread.start()
-
+        controller: _ProcessController | None = None
+        reader_threads: list[threading.Thread] = []
+        stdin_thread: threading.Thread | None = None
+        started_threads: list[threading.Thread] = []
         timed_out = False
         try:
+            controller = _ProcessController(process)
+            reader_threads = [
+                threading.Thread(
+                    target=_read_output_stream,
+                    args=(process.stdout, "stdout", collector, controller),
+                    name="coding-agent-stdout-reader",
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=_read_output_stream,
+                    args=(process.stderr, "stderr", collector, controller),
+                    name="coding-agent-stderr-reader",
+                    daemon=True,
+                ),
+            ]
+            stdin_thread = threading.Thread(
+                target=_write_stdin,
+                args=(process, plan.stdin),
+                name="coding-agent-stdin-writer",
+                daemon=True,
+            )
+            for thread in (*reader_threads, stdin_thread):
+                try:
+                    thread.start()
+                except BaseException:
+                    if thread.ident is not None:
+                        started_threads.append(thread)
+                    raise
+                else:
+                    started_threads.append(thread)
+
             timed_out = _wait_for_process(
                 process,
                 deadline=started_at + plan.limits.timeout_seconds,
                 clock=self._clock,
                 controller=controller,
             )
-            if timed_out:
-                _close_process_streams(process)
-                _wait_for_exit(process, _PROCESS_CLEANUP_WAIT_SECONDS)
+            if timed_out or controller.reason is not None:
+                _cleanup_started_process(
+                    process,
+                    controller,
+                    started_threads,
+                    reason=controller.reason or "timeout",
+                )
             elif not _join_threads_until(
-                reader_threads + [stdin_thread],
+                started_threads,
                 started_at + plan.limits.timeout_seconds,
                 self._clock,
             ):
                 timed_out = True
-                controller.terminate("timeout")
+                _cleanup_started_process(process, controller, started_threads, reason="timeout")
+            else:
                 _close_process_streams(process)
-                _wait_for_exit(process, _PROCESS_CLEANUP_WAIT_SECONDS)
-        except KeyboardInterrupt:
-            controller.terminate("interrupted")
-            _close_process_streams(process)
-            _wait_for_exit(process, _PROCESS_CLEANUP_WAIT_SECONDS)
-            _join_threads_bounded(reader_threads + [stdin_thread], _PROCESS_CLEANUP_WAIT_SECONDS)
-            controller.close()
+                controller.close()
+        except BaseException as exc:
+            cleanup_error = _cleanup_started_process(
+                process,
+                controller,
+                started_threads,
+                reason=(
+                    "interrupted" if isinstance(exc, KeyboardInterrupt) else "initialization_error"
+                ),
+            )
+            if cleanup_error:
+                exc.add_note(f"Process cleanup warning: {cleanup_error}")
             raise
-
-        if timed_out:
-            _join_threads_bounded(reader_threads + [stdin_thread], _PROCESS_CLEANUP_WAIT_SECONDS)
-        else:
-            _close_process_streams(process)
-        controller.close()
 
         exit_code = process.returncode
         truncated = collector.truncated
@@ -324,7 +339,7 @@ class _ProcessController:
             else:
                 _terminate_process_tree(self._process)
         except (OSError, subprocess.SubprocessError) as exc:
-            self.cleanup_error = str(exc)
+            self.record_cleanup_error(str(exc))
 
     def close(self) -> None:
         if self._windows_job is None:
@@ -332,7 +347,14 @@ class _ProcessController:
         try:
             self._windows_job.close()
         except OSError as exc:
-            self.cleanup_error = str(exc)
+            self.record_cleanup_error(str(exc))
+
+    def record_cleanup_error(self, message: str) -> None:
+        with self._lock:
+            if self.cleanup_error is None:
+                self.cleanup_error = message
+            elif message not in self.cleanup_error:
+                self.cleanup_error = f"{self.cleanup_error}; {message}"
 
 
 if os.name == "nt":
@@ -433,40 +455,38 @@ class _BoundedOutputCollector:
     """Collect stdout and stderr under one shared byte budget."""
 
     def __init__(self, limit: int) -> None:
-        self._remaining = limit
+        self._limit = limit
+        self._recorded = 0
+        self._read_size = min(limit, _OUTPUT_READ_CHUNK_SIZE)
         self._buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
-        self._condition = threading.Condition()
+        self._lock = threading.Lock()
         self.truncated = False
         self.io_error: str | None = None
 
-    def reserve(self, requested: int) -> int:
-        with self._condition:
-            while self._remaining <= 0 and not self.truncated:
-                self._condition.wait()
-            if self.truncated:
+    def next_read_size(self) -> int:
+        with self._lock:
+            if self.truncated or self.io_error is not None:
                 return 0
-            reserved = min(requested, self._remaining)
-            self._remaining -= reserved
-            return reserved
+            return self._read_size
 
-    def record(self, stream_name: str, data: bytes, reserved: int) -> None:
-        with self._condition:
-            if len(data) < reserved:
-                self._remaining += reserved - len(data)
-            elif self._remaining == 0:
+    def record(self, stream_name: str, data: bytes) -> bool:
+        with self._lock:
+            remaining = self._limit - self._recorded
+            accepted = data[:remaining]
+            self._buffers[stream_name].extend(accepted)
+            self._recorded += len(accepted)
+            if len(data) > remaining:
                 self.truncated = True
-            self._buffers[stream_name].extend(data[:reserved])
-            self._condition.notify_all()
+            return not self.truncated
 
     def data(self, stream_name: str) -> bytes:
-        with self._condition:
+        with self._lock:
             return bytes(self._buffers[stream_name])
 
     def fail(self, message: str) -> None:
-        with self._condition:
+        with self._lock:
             if self.io_error is None:
                 self.io_error = message
-            self._condition.notify_all()
 
 
 def _read_output_stream(
@@ -478,22 +498,19 @@ def _read_output_stream(
     if stream is None:
         return
     while True:
-        reserved = collector.reserve(_OUTPUT_READ_CHUNK_SIZE)
-        if reserved == 0:
-            controller.terminate("output_limit")
+        read_size = collector.next_read_size()
+        if read_size == 0:
             return
         try:
-            data = stream.read(reserved)  # type: ignore[union-attr]
+            read = getattr(stream, "read1", stream.read)  # type: ignore[union-attr]
+            data = read(read_size)
         except (OSError, ValueError) as exc:
-            collector.record(stream_name, b"", reserved)
             collector.fail(f"Unable to read {stream_name}: {exc}")
             controller.terminate("io_error")
             return
         if not data:
-            collector.record(stream_name, b"", reserved)
             return
-        collector.record(stream_name, data, reserved)
-        if collector.truncated:
+        if not collector.record(stream_name, data):
             controller.terminate("output_limit")
             return
 
@@ -539,6 +556,8 @@ def _wait_for_process(
 ) -> bool:
     """Wait until the process exits or terminate it when the deadline expires."""
     while _process_poll(process) is None:
+        if controller.reason is not None:
+            return controller.reason == "timeout"
         remaining = deadline - clock()
         if remaining <= 0:
             controller.terminate("timeout")
@@ -551,6 +570,8 @@ def _wait_for_process(
 
 
 def _wait_for_exit(process: subprocess.Popen[bytes], timeout: float) -> bool:
+    if _process_poll(process) is not None:
+        return True
     try:
         process.wait(timeout=timeout)
     except (subprocess.TimeoutExpired, OSError, TypeError, KeyboardInterrupt):
@@ -573,10 +594,10 @@ def _join_threads_until(
     return True
 
 
-def _join_threads_bounded(threads: list[threading.Thread], timeout: float) -> None:
-    deadline = time.monotonic() + timeout
+def _join_threads_bounded(threads: list[threading.Thread], deadline: float) -> bool:
     for thread in threads:
         thread.join(timeout=max(0.0, deadline - time.monotonic()))
+    return all(not thread.is_alive() for thread in threads)
 
 
 def _close_process_streams(process: subprocess.Popen[bytes]) -> None:
@@ -586,43 +607,112 @@ def _close_process_streams(process: subprocess.Popen[bytes]) -> None:
                 stream.close()
 
 
+def _cleanup_started_process(
+    process: subprocess.Popen[bytes],
+    controller: _ProcessController | None,
+    threads: list[threading.Thread],
+    *,
+    reason: str,
+) -> str | None:
+    """Stop and reap a launched process without blocking past the cleanup deadline."""
+    deadline = time.monotonic() + _PROCESS_CLEANUP_WAIT_SECONDS
+    if controller is None:
+        cleanup_errors: list[str] = []
+        try:
+            _terminate_process_tree(process)
+        except (OSError, subprocess.SubprocessError) as exc:
+            cleanup_errors.append(str(exc))
+    else:
+        controller.terminate(reason)
+        controller.close()
+        cleanup_errors = []
+
+    if not _wait_for_exit(process, max(0.0, deadline - time.monotonic())):
+        cleanup_errors.append(
+            f"process exit was not confirmed within {_PROCESS_CLEANUP_WAIT_SECONDS:g} second(s)"
+        )
+    threads_stopped = _join_threads_bounded(threads, deadline)
+    if threads_stopped:
+        _close_process_streams(process)
+    else:
+        cleanup_errors.append(
+            "I/O worker threads did not stop before the cleanup deadline; "
+            "their active streams were left open to avoid a blocking close"
+        )
+
+    for cleanup_error in cleanup_errors:
+        if controller is not None:
+            controller.record_cleanup_error(cleanup_error)
+    if controller is not None:
+        return controller.cleanup_error
+    return "; ".join(cleanup_errors) or None
+
+
 def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
     pid = getattr(process, "pid", None)
-    if pid is not None and os.name == "nt":
-        taskkill = _resolve_taskkill()
-        taskkill_error: Exception | None = None
-        if taskkill is not None:
-            try:
-                completed = subprocess.run(
-                    [taskkill, "/PID", str(pid), "/T", "/F"],
-                    check=False,
-                    shell=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=_PROCESS_CLEANUP_WAIT_SECONDS,
-                )
-                if completed.returncode == 0:
-                    return
-            except (OSError, subprocess.SubprocessError) as exc:
-                taskkill_error = exc
+    if pid is None:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        return
+    if os.name == "nt":
+        _terminate_windows_process_tree(process, pid)
+    else:
+        _terminate_posix_process_tree(process, pid)
+
+
+def _terminate_windows_process_tree(process: subprocess.Popen[bytes], pid: int) -> None:
+    taskkill = _resolve_taskkill()
+    if taskkill is None:
+        tree_error = "taskkill.exe is unavailable"
+    else:
+        try:
+            completed = subprocess.run(
+                [taskkill, "/PID", str(pid), "/T", "/F"],
+                check=False,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=_PROCESS_CLEANUP_WAIT_SECONDS,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            tree_error = f"taskkill.exe failed: {exc}"
+        else:
+            if completed.returncode == 0:
+                return
+            tree_error = f"taskkill.exe exited with code {completed.returncode}"
+
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        raise OSError(f"{tree_error}; parent process kill failed: {exc}") from exc
+    raise OSError(
+        f"{tree_error}; only the parent process was killed, so process-tree cleanup "
+        "could not be confirmed"
+    )
+
+
+def _terminate_posix_process_tree(process: subprocess.Popen[bytes], pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+        return
+    except ProcessLookupError:
+        return
+    except OSError as group_error:
         try:
             process.kill()
-        except (OSError, ProcessLookupError) as exc:
-            if taskkill_error is not None:
-                raise taskkill_error from exc
-        return
-
-    if pid is not None and os.name != "nt":
-        try:
-            os.killpg(pid, signal.SIGKILL)
-            return
         except ProcessLookupError:
-            return
-        except OSError:
             pass
-    with contextlib.suppress(OSError, ProcessLookupError):
-        process.kill()
+        except OSError as parent_error:
+            raise OSError(
+                f"killpg failed: {group_error}; parent process kill failed: {parent_error}"
+            ) from parent_error
+        raise OSError(
+            f"killpg failed: {group_error}; only the parent process was killed, "
+            "so process-tree cleanup could not be confirmed"
+        ) from group_error
 
 
 def _resolve_taskkill() -> str | None:
@@ -822,41 +912,50 @@ def _resolve_argv(
 ) -> tuple[tuple[str, ...], _ExecutableFingerprint]:
     executable = argv[0]
     if executable.casefold() in _PYTHON_COMMAND_NAMES:
-        resolved_executable = str(Path(sys.executable).resolve(strict=True))
+        launch_path = Path(os.path.abspath(sys.executable))
+        try:
+            identity_path = launch_path.resolve(strict=True)
+        except OSError as exc:
+            raise _CommandPreparationError("Current Python executable was not found.") from exc
     elif _has_path_separator(executable):
         executable_path = Path(executable)
         candidate = executable_path if executable_path.is_absolute() else cwd / executable_path
         try:
-            resolved_path = candidate.resolve(strict=True)
+            identity_path = candidate.resolve(strict=True)
         except OSError as exc:
             raise _CommandPreparationError(
                 f"Command executable was not found: {executable}"
             ) from exc
         if not executable_path.is_absolute():
             try:
-                resolved_path.relative_to(workspace_root)
+                identity_path.relative_to(workspace_root)
             except ValueError as exc:
                 raise _CommandPreparationError(
                     "Relative command executable must stay inside the workspace."
                 ) from exc
-        resolved_executable = str(resolved_path)
+        launch_path = Path(os.path.abspath(candidate))
     else:
         resolved = shutil.which(executable)
         if resolved is None:
             raise _CommandPreparationError(f"Command executable was not found: {executable}")
-        resolved_executable = str(Path(resolved).resolve(strict=True))
+        launch_path = Path(os.path.abspath(resolved))
+        try:
+            identity_path = launch_path.resolve(strict=True)
+        except OSError as exc:
+            raise _CommandPreparationError(
+                f"Command executable was not found: {executable}"
+            ) from exc
 
-    if Path(resolved_executable).suffix.casefold() in _WINDOWS_SCRIPT_SUFFIXES:
+    if identity_path.suffix.casefold() in _WINDOWS_SCRIPT_SUFFIXES:
         raise _CommandPreparationError("Windows batch scripts are not supported.")
-    if not Path(resolved_executable).is_file():
+    if not identity_path.is_file():
         raise _CommandPreparationError("Command executable must resolve to a file.")
-    executable_path = Path(resolved_executable)
     try:
-        executable_stat = executable_path.stat()
+        executable_stat = identity_path.stat()
     except OSError as exc:
         raise _CommandPreparationError("Command executable could not be inspected.") from exc
     fingerprint = _ExecutableFingerprint(
-        path=executable_path,
+        path=identity_path,
         device=executable_stat.st_dev,
         inode=executable_stat.st_ino,
         mode=executable_stat.st_mode,
@@ -864,7 +963,7 @@ def _resolve_argv(
         modified_ns=executable_stat.st_mtime_ns,
         changed_ns=executable_stat.st_ctime_ns,
     )
-    return (resolved_executable, *argv[1:]), fingerprint
+    return (str(launch_path), *argv[1:]), fingerprint
 
 
 def _has_path_separator(value: str) -> bool:
