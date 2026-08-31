@@ -14,18 +14,18 @@
 ### 1. 获取代码并同步环境
 
 ```powershell
-git clone https://github.com/IceBear-Kay/coding-agent.git
+git clone --branch develop https://github.com/IceBear-Kay/coding-agent.git
 Set-Location .\coding-agent
 uv sync --frozen
 uv run python --version
 uv --version
 ```
 
-`uv sync --frozen` 按已有 `uv.lock` 同步依赖，不重新解析或修改锁文件。Python 版本应为 `3.12.x`。
+仓库默认分支 `main` 当前尚未包含可运行代码，因此首次克隆时显式检出 `develop`；这不会修改 GitHub 的默认分支。`uv sync --frozen` 按已有 `uv.lock` 同步依赖，不重新解析或修改锁文件。Python 版本应为 `3.12.x`。
 
 ### 2. 准备一个普通示例工作区
 
-下面的命令在仓库旁创建 `coding-agent-demo`，不会使用仓库的私人 `.local/` 目录；已有的 `notes.md` 不会被覆盖。
+下面的命令在仓库内创建 `coding-agent-demo`，不会使用仓库的私人 `.local/` 目录；已有的 `notes.md` 不会被覆盖。
 
 ```powershell
 $demo = Join-Path (Get-Location) 'coding-agent-demo'
@@ -49,12 +49,18 @@ if (-not (Test-Path -LiteralPath $notes)) {
 - `DEEPSEEK_MODEL`：必填的模型标识。
 - `DEEPSEEK_TIMEOUT_SECONDS`：必填的 API 请求超时秒数，必须大于 0；模板使用 `60`。
 
-仓库提供不含凭据的 `.env.example`。程序不会自动搜索或读取 `.env`；需要使用配置文件时，必须通过 `uv run --env-file .env` 显式加载。可先复制模板，再在本地编辑 `.env`，该文件已被 Git 忽略：
+仓库提供不含凭据的 `.env.example`。程序不会自动搜索或读取 `.env`；需要使用配置文件时，必须通过 `uv run --env-file .env` 显式加载。下面的命令只在目标不存在时复制模板，已有 `.env` 会原样保留且不会被读取或覆盖：
 
 ```powershell
-Copy-Item .env.example .env
-uv run --env-file .env coding-agent --help
+if (Test-Path -LiteralPath .env) {
+    Write-Host '已存在 .env，保留现有文件。'
+}
+else {
+    Copy-Item -LiteralPath .env.example -Destination .env
+}
 ```
+
+随后在本地编辑未跟踪的 `.env`，填写真实 Key。该文件已被 Git 忽略，不能将凭据写入任何受 Git 跟踪的文件。
 
 如果不希望把 Key 写入文件，可在当前 PowerShell 中用隐藏输入设置它，再在同一会话设置其余配置：
 
@@ -74,10 +80,23 @@ $env:DEEPSEEK_MODEL = 'deepseek-v4-flash'
 $env:DEEPSEEK_TIMEOUT_SECONDS = '60'
 ```
 
-检查配置是否完整时只输出状态，不输出 Key：
+使用 `.env` 时，通过下面的安全检查确认配置是否完整。脚本会捕获 `ProviderConfigurationError`，只输出不含配置值的错误说明，并以状态码 `1` 退出，不打印异常链：
 
 ```powershell
-uv run python -c "from coding_agent.config import ProviderConfig; ProviderConfig.from_env(); print('DeepSeek 配置完整')"
+@'
+import sys
+
+from coding_agent.config import ProviderConfig
+from coding_agent.errors import ProviderConfigurationError
+
+try:
+    ProviderConfig.from_env()
+except ProviderConfigurationError as error:
+    print(f"配置错误: {error}", file=sys.stderr)
+    raise SystemExit(1)
+
+print("DeepSeek 配置完整")
+'@ | uv run --env-file .env python -
 ```
 
 这些 `$env:` 变量只在当前 PowerShell 会话及其启动的子进程中有效；换用新终端后需要重新设置。更换 Flash/Pro 只需修改 `DEEPSEEK_MODEL`，具体标识以 DeepSeek 账户实际可用的模型为准：
@@ -90,16 +109,16 @@ $env:DEEPSEEK_MODEL = 'deepseek-v4-pro'
 
 ### 4. 启动 Agent
 
-使用环境变量方式：
-
-```powershell
-uv run coding-agent '读取 notes.md 并用中文总结文件内容。' --workspace $demo --max-steps 8
-```
-
-使用本地配置文件方式：
+推荐使用本地 `.env`；后续示例统一采用这种显式加载方式：
 
 ```powershell
 uv run --env-file .env coding-agent '读取 notes.md 并用中文总结文件内容。' --workspace $demo --max-steps 8
+```
+
+如果上一节选择了当前 PowerShell 环境变量方式，则不需要加载文件：
+
+```powershell
+uv run coding-agent '读取 notes.md 并用中文总结文件内容。' --workspace $demo --max-steps 8
 ```
 
 默认只开放 `list_files` 和 `read_file`。模型请求写入或执行工具时，未显式开启对应开关就会收到拒绝；开启后仍必须由你逐次审批。
@@ -109,25 +128,25 @@ uv run --env-file .env coding-agent '读取 notes.md 并用中文总结文件内
 只读文件：
 
 ```powershell
-uv run coding-agent '读取 notes.md，列出其中的主要信息。' --workspace $demo
+uv run --env-file .env coding-agent '读取 notes.md，列出其中的主要信息。' --workspace $demo
 ```
 
 创建或精确修改文件。每一次 `write_file` 或 `edit_file` 都会显示预览并等待确认：
 
 ```powershell
-uv run coding-agent '创建 greeting.py，输出 Hello。' --workspace $demo --allow-write --max-steps 8
+uv run --env-file .env coding-agent '创建 greeting.py，输出 Hello。' --workspace $demo --allow-write --max-steps 8
 ```
 
 生成 Python 程序并运行验证。文件写入和命令执行是两类独立的逐次审批：
 
 ```powershell
-uv run coding-agent '创建 solution.py，读取两个整数并输出它们的和，然后用输入 7 5 运行验证。' --workspace $demo --allow-write --allow-exec --command-timeout 10 --command-output-limit 65536 --max-steps 8 --max-retries 0
+uv run --env-file .env coding-agent '创建 solution.py，读取两个整数并输出它们的和，然后用输入 7 5 运行验证。' --workspace $demo --allow-write --allow-exec --command-timeout 10 --command-output-limit 65536 --max-steps 8 --max-retries 0
 ```
 
 省略任务参数后，Agent 会在终端读取一次任务；这仍是单次任务，不是多轮会话：
 
 ```powershell
-uv run coding-agent --workspace $demo
+uv run --env-file .env coding-agent --workspace $demo
 ```
 
 查看当前安装版本的完整参数说明：
@@ -135,6 +154,8 @@ uv run coding-agent --workspace $demo
 ```powershell
 uv run coding-agent --help
 ```
+
+`--help` 只验证 CLI 帮助入口并列出参数，不创建 Provider，因此不验证 `.env` 或 DeepSeek 配置。
 
 更完整的工具协议、安全边界和可选真实 DeepSeek 验证说明见 [`docs/cli.md`](docs/cli.md) 与 [`docs/architecture.md`](docs/architecture.md)。
 
