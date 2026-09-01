@@ -22,7 +22,7 @@ from coding_agent import session_store as session_store_module
 from coding_agent.config import ProviderConfig
 from coding_agent.errors import ProviderNetworkError
 from coding_agent.provider import OpenAICompatibleProvider
-from coding_agent.session import SESSION_SAVE_ERROR_STOP_REASON
+from coding_agent.session import SESSION_LOCK_ERROR_STOP_REASON, SESSION_SAVE_ERROR_STOP_REASON
 from coding_agent.session_store import SessionConflictError, SessionStore, SessionStoreError
 
 
@@ -579,6 +579,51 @@ def test_persistent_session_rejects_second_resume_while_first_is_active(tmp_path
             "chat_1",
         )
     first.close()
+
+
+def test_closed_session_run_is_rejected_before_provider_or_tools(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    provider = FakeProvider([])
+    first = AgentSession.create(AgentLoop(provider, Workspace(tmp_path)), store, "chat_1")
+    first.close()
+
+    result = first.run("不应执行")
+
+    assert result.stop_reason == SESSION_LOCK_ERROR_STOP_REASON
+    assert provider.requests == []
+
+
+def test_closed_session_cannot_run_while_another_instance_holds_lock(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    first_provider = FakeProvider([])
+    first = AgentSession.create(AgentLoop(first_provider, Workspace(tmp_path)), store, "chat_1")
+    first.close()
+    resumed_provider = FakeProvider([ModelResponse(text="继续", finish_reason="stop")])
+    resumed = AgentSession.resume(AgentLoop(resumed_provider, Workspace(tmp_path)), store, "chat_1")
+
+    result = first.run("不应执行")
+
+    assert result.stop_reason == SESSION_LOCK_ERROR_STOP_REASON
+    assert first_provider.requests == []
+    assert resumed_provider.requests == []
+    resumed.close()
+
+
+def test_resume_keyboard_interrupt_releases_its_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    store.create("chat_1", tmp_path)
+
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(store, "load", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        AgentSession.resume(AgentLoop(FakeProvider([]), Workspace(tmp_path)), store, "chat_1")
+
+    lease = store.acquire("chat_1")
+    lease.release()
 
 
 def test_persistent_resume_rebuilds_system_prompt_for_current_run(tmp_path: Path) -> None:

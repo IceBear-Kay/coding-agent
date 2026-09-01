@@ -357,10 +357,12 @@ def _run_chat(
                     try:
                         session.close()
                     except SessionStoreError as exc:
-                        with suppress(SessionStoreError):
+                        try:
                             replacement.close()
+                        except SessionStoreError as cleanup_exc:
+                            error_fn(f"错误: 新持久会话资源清理失败：{cleanup_exc}")
                         error_fn(f"错误: 旧持久会话锁未能释放：{exc}")
-                        continue
+                        return 2
                     session = replacement
                     output_fn(
                         "会话历史已清空，已切换到新持久会话\n"
@@ -376,7 +378,13 @@ def _run_chat(
             if exit_code != 0:
                 return exit_code
     finally:
-        session.close()
+        active_exception = sys.exc_info()[1]
+        try:
+            session.close()
+        except SessionStoreError as exc:
+            error_fn(f"错误: 会话锁释放失败：{exc}")
+            if not isinstance(active_exception, KeyboardInterrupt):
+                raise
 
 
 def main(
@@ -489,9 +497,18 @@ def main(
                     session = AgentSession.create(loop, store, args.session)
                 else:
                     session = AgentSession.resume(loop, store, args.resume)
-                output_fn(f"持久会话 ID: {session.session_id}\n存档路径: {session.archive_path}")
-                if args.resume is not None:
-                    output_fn("提示：历史工具结果可能过时，请重新读取并核验当前文件。")
+                try:
+                    output_fn(
+                        f"持久会话 ID: {session.session_id}\n存档路径: {session.archive_path}"
+                    )
+                    if args.resume is not None:
+                        output_fn("提示：历史工具结果可能过时，请重新读取并核验当前文件。")
+                except BaseException:
+                    try:
+                        session.close()
+                    except SessionStoreError as cleanup_exc:
+                        report_error(f"错误: 会话锁释放失败：{cleanup_exc}")
+                    raise
 
                 def create_session() -> AgentSession:
                     return AgentSession.create(loop, store, uuid.uuid4().hex)

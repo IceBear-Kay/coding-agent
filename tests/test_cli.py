@@ -12,7 +12,7 @@ from coding_agent.cli import build_parser, main
 from coding_agent.context import measure_context_bytes
 from coding_agent.models import Message, ModelResponse, ToolCall
 from coding_agent.provider import FakeProvider
-from coding_agent.session_store import SessionStore
+from coding_agent.session_store import SessionStore, SessionStoreError
 from coding_agent.tools import Workspace, create_read_only_registry
 
 
@@ -389,6 +389,84 @@ def test_cli_persistent_clear_failure_keeps_current_session(
     assert exit_code == 0
     assert errors and errors[0].startswith("错误: 无法切换持久会话：")
     assert sorted(path.name for path in store_root.glob("*.json")) == ["chat_old.json"]
+
+
+def test_cli_clear_release_failure_stops_without_follow_up_model_or_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_root = tmp_path / "archives"
+    original_acquire = SessionStore.acquire
+    leases = []
+
+    def capture_acquire(store: SessionStore, session_id: str):
+        lease = original_acquire(store, session_id)
+        leases.append(lease)
+        if len(leases) == 2:
+            original_release = lease.release
+            failed = False
+
+            def fail_once() -> None:
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise SessionStoreError("simulated old lock release failure")
+                original_release()
+
+            lease.release = fail_once  # type: ignore[method-assign]
+        return lease
+
+    monkeypatch.setattr(SessionStore, "acquire", capture_acquire)
+    provider = FakeProvider([ModelResponse(text="旧回答", finish_reason="stop")])
+    inputs = iter(["旧任务", "/clear", "不应执行"])
+    errors: list[str] = []
+    exit_code = main(
+        [
+            "--chat",
+            "--session",
+            "chat_old",
+            "--session-dir",
+            str(store_root),
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+        ],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 2
+    assert len(provider.requests) == 1
+    assert errors and any("旧持久会话锁未能释放" in message for message in errors)
+    assert not (tmp_path / "unexpected.txt").exists()
+
+
+def test_cli_startup_output_failure_releases_session_lock(
+    tmp_path: Path,
+) -> None:
+    store_root = tmp_path / "archives"
+
+    def fail_output(_: str) -> None:
+        raise RuntimeError("simulated output failure")
+
+    with pytest.raises(RuntimeError, match="simulated output failure"):
+        main(
+            [
+                "--chat",
+                "--session",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+                "--read-only",
+            ],
+            provider=FakeProvider([]),
+            output_fn=fail_output,
+        )
+
+    lease = SessionStore(store_root).acquire("chat_1")
+    lease.release()
 
 
 def test_cli_memory_chat_does_not_create_session_archive(

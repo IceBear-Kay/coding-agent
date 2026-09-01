@@ -63,10 +63,27 @@ class SessionLease:
         self.session_id = _validate_session_id(session_id)
         self.path = store.root / f".{self.session_id}.lock"
         self._descriptor: int | None = None
+        self._identity: tuple[int, int] | None = None
 
     @property
     def held(self) -> bool:
-        return self._descriptor is not None
+        descriptor = self._descriptor
+        identity = self._identity
+        if descriptor is None or identity is None:
+            return False
+        try:
+            current = self.path.lstat()
+            descriptor_stat = os.fstat(descriptor)
+        except OSError:
+            return False
+        return (
+            (current.st_dev, current.st_ino)
+            == identity
+            == (
+                descriptor_stat.st_dev,
+                descriptor_stat.st_ino,
+            )
+        )
 
     def acquire(self) -> SessionLease:
         if self.held:
@@ -87,13 +104,16 @@ class SessionLease:
         try:
             os.write(descriptor, str(os.getpid()).encode("ascii"))
             os.fsync(descriptor)
-        except OSError as exc:
+            descriptor_stat = os.fstat(descriptor)
+            self._identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
+        except BaseException as exc:
             cleanup_error: OSError | None = None
             try:
                 os.close(descriptor)
             except OSError as close_exc:
                 cleanup_error = close_exc
             self._descriptor = None
+            self._identity = None
             try:
                 self.path.unlink()
             except OSError as unlink_exc:
@@ -102,6 +122,10 @@ class SessionLease:
                 raise SessionStoreError(
                     "session lock initialization failed and cleanup failed"
                 ) from exc
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            if not isinstance(exc, OSError):
+                raise
             raise SessionStoreError("session lock initialization failed") from exc
         return self
 
@@ -110,6 +134,7 @@ class SessionLease:
         if descriptor is None:
             return
         self._descriptor = None
+        self._identity = None
         close_error: OSError | None = None
         try:
             os.close(descriptor)

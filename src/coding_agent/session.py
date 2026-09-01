@@ -5,15 +5,17 @@ from contextlib import suppress
 from pathlib import Path
 
 from coding_agent.agent import COMPLETED_STOP_REASON, AgentLoop, AgentRunResult
-from coding_agent.models import Message, SessionState
+from coding_agent.models import AgentState, Message, SessionState
 from coding_agent.session_store import (
     SessionArchive,
+    SessionConflictError,
     SessionLease,
     SessionStore,
     SessionStoreError,
 )
 
 SESSION_SAVE_ERROR_STOP_REASON = "session_save_error"
+SESSION_LOCK_ERROR_STOP_REASON = "session_lock_error"
 
 
 class AgentSession:
@@ -61,7 +63,7 @@ class AgentSession:
         try:
             lease = store.acquire(session_id)
             return cls(loop, store=store, archive=archive, lease=lease)
-        except Exception:
+        except BaseException:
             if lease is not None:
                 with suppress(Exception):
                     lease.release()
@@ -74,7 +76,7 @@ class AgentSession:
         try:
             archive = store.load(session_id, workspace_root=loop.workspace.root)
             return cls(loop, store=store, archive=archive, lease=lease)
-        except Exception:
+        except BaseException:
             with suppress(Exception):
                 lease.release()
             raise
@@ -98,6 +100,17 @@ class AgentSession:
 
     def run(self, task: str) -> AgentRunResult:
         """Run a task and commit its complete history only after normal completion."""
+        if self._archive is not None and (self._lease is None or not self._lease.held):
+            state = AgentState(
+                workspace_root=Path(self.loop.workspace.root),
+                max_steps=self.loop.max_steps,
+                stop_reason=SESSION_LOCK_ERROR_STOP_REASON,
+            )
+            return AgentRunResult(
+                answer=None,
+                state=state,
+                error=SessionConflictError("session lease is no longer held"),
+            )
         result = self.loop.run(task, history=self.state.messages)
         if result.stop_reason == COMPLETED_STOP_REASON:
             committed_messages = [
@@ -128,8 +141,8 @@ class AgentSession:
         """Release the persistent session lease, preserving the archive on disk."""
         if self._lease is not None:
             lease = self._lease
-            self._lease = None
             lease.release()
+            self._lease = None
 
     def __enter__(self) -> "AgentSession":
         return self
@@ -138,4 +151,8 @@ class AgentSession:
         self.close()
 
 
-__all__ = ["AgentSession", "SESSION_SAVE_ERROR_STOP_REASON"]
+__all__ = [
+    "AgentSession",
+    "SESSION_LOCK_ERROR_STOP_REASON",
+    "SESSION_SAVE_ERROR_STOP_REASON",
+]

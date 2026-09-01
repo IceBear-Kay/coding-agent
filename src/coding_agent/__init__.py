@@ -59,7 +59,11 @@ from coding_agent.models import (
     Usage,
 )
 from coding_agent.provider import FakeProvider, ModelProvider, OpenAICompatibleProvider
-from coding_agent.session import SESSION_SAVE_ERROR_STOP_REASON, AgentSession
+from coding_agent.session import (
+    SESSION_LOCK_ERROR_STOP_REASON,
+    SESSION_SAVE_ERROR_STOP_REASON,
+    AgentSession,
+)
 from coding_agent.session_store import (
     DEFAULT_MAX_SESSION_BYTES,
     MAX_SESSION_ID_LENGTH,
@@ -106,6 +110,7 @@ __all__ = [
     "AgentRunResult",
     "AgentSession",
     "SESSION_SAVE_ERROR_STOP_REASON",
+    "SESSION_LOCK_ERROR_STOP_REASON",
     "AgentEvent",
     "AgentEventCallback",
     "COMPLETED_STOP_REASON",
