@@ -616,6 +616,7 @@ def test_closed_session_run_is_rejected_before_provider_or_tools(tmp_path: Path)
     result = first.run("不应执行")
 
     assert result.stop_reason == SESSION_LOCK_ERROR_STOP_REASON
+    assert result.stats.stop_reason == result.stop_reason
     assert provider.requests == []
 
 
@@ -630,6 +631,7 @@ def test_closed_session_cannot_run_while_another_instance_holds_lock(tmp_path: P
     result = first.run("不应执行")
 
     assert result.stop_reason == SESSION_LOCK_ERROR_STOP_REASON
+    assert result.stats.stop_reason == result.stop_reason
     assert first_provider.requests == []
     assert resumed_provider.requests == []
     resumed.close()
@@ -700,6 +702,7 @@ def test_persistent_session_save_failure_keeps_real_result_and_old_archive(
     result = session.run("task with real result")
 
     assert result.stop_reason == SESSION_SAVE_ERROR_STOP_REASON
+    assert result.stats.stop_reason == result.stop_reason
     assert isinstance(result.error, SessionStoreError)
     assert result.answer == "answer"
     assert Message(role="user", content="task with real result") in session.messages
@@ -727,6 +730,7 @@ def test_persistent_session_archive_io_failure_keeps_answer_and_old_archive(
     result = session.run("执行并保存")
 
     assert result.stop_reason == SESSION_SAVE_ERROR_STOP_REASON
+    assert result.stats.stop_reason == result.stop_reason
     assert result.answer == "真实答案"
     assert isinstance(result.error, SessionStoreError)
     assert store.load("chat_1", workspace_root=tmp_path) == original

@@ -197,6 +197,10 @@ class AgentLoop:
                 state.stats.provider_attempts += 1
                 try:
                     response = self.provider.complete(list(selection.messages), tool_schemas)
+                except KeyboardInterrupt:
+                    # A started request with no usable response has unknown usage.
+                    state.stats.unknown_usage_requests += 1
+                    raise
                 except TransientProviderError as exc:
                     state.stats.unknown_usage_requests += 1
                     if retry_count >= self.max_retries or state.step_count >= state.max_steps:

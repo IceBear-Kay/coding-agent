@@ -202,6 +202,43 @@ def test_agent_loop_records_tool_result_before_result_event_interrupt(tmp_path: 
     assert len(provider.requests) == 1
 
 
+def test_agent_loop_approval_interrupt_does_not_add_unknown_request(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+
+    def interrupt(_: ApprovalRequest) -> bool:
+        raise KeyboardInterrupt
+
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        approval_callback=interrupt,
+    )
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write",
+                        name="write_file",
+                        arguments={"path": "created.txt", "content": "saved"},
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=8, output_tokens=3, total_tokens=11),
+            )
+        ]
+    )
+
+    result = AgentLoop(provider, workspace, registry=registry).run("Create created.txt")
+
+    assert result.stop_reason == "interrupted"
+    assert result.stats.provider_attempts == 1
+    assert result.stats.known_usage_requests == 1
+    assert result.stats.unknown_usage_requests == 0
+    assert result.stats.stop_reason == result.stop_reason
+    assert not (tmp_path / "created.txt").exists()
+
+
 def test_agent_loop_round_trips_approved_file_result(tmp_path: Path) -> None:
     workspace = Workspace(tmp_path)
     registry = create_workspace_registry(
@@ -836,6 +873,31 @@ def test_agent_loop_retries_transient_provider_error_within_budget(tmp_path: Pat
     assert delays == [0.5]
 
 
+def test_agent_loop_retry_wait_interrupt_is_not_counted_as_another_request(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider([ProviderNetworkError("temporary")])
+
+    def interrupt(_: float) -> None:
+        raise KeyboardInterrupt
+
+    result = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        max_retries=1,
+        retry_delay_seconds=1.0,
+        sleep=interrupt,
+    ).run("Retry once")
+
+    assert result.stop_reason == "interrupted"
+    assert result.stats.provider_attempts == 1
+    assert result.stats.known_usage_requests == 0
+    assert result.stats.unknown_usage_requests == 1
+    assert result.stats.provider_attempts == (
+        result.stats.known_usage_requests + result.stats.unknown_usage_requests
+    )
+
+
 def test_agent_loop_collects_task_runtime_usage_and_tool_counts(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("Project contents", encoding="utf-8")
     provider = FakeProvider(
@@ -980,6 +1042,48 @@ def test_agent_loop_handles_keyboard_interrupt_without_traceback(tmp_path: Path)
     assert result.stop_reason == "interrupted"
     assert isinstance(result.error, KeyboardInterrupt)
     assert result.state.step_count == 1
+
+
+def test_agent_loop_counts_provider_keyboard_interrupt_as_unknown_usage(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider([KeyboardInterrupt()])
+
+    result = AgentLoop(provider, Workspace(tmp_path)).run("Stop me safely.")
+
+    assert result.stop_reason == "interrupted"
+    assert result.stats.stop_reason == result.stop_reason
+    assert result.stats.provider_attempts == 1
+    assert result.stats.known_usage_requests == 0
+    assert result.stats.unknown_usage_requests == 1
+    assert result.stats.provider_attempts == (
+        result.stats.known_usage_requests + result.stats.unknown_usage_requests
+    )
+
+
+def test_agent_loop_preserves_known_usage_before_provider_interrupt(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_list", name="list_files", arguments={})],
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=4, output_tokens=2, total_tokens=6),
+            ),
+            KeyboardInterrupt(),
+        ]
+    )
+
+    result = AgentLoop(provider, Workspace(tmp_path), max_steps=2).run("two-step task")
+
+    assert result.stop_reason == "interrupted"
+    assert result.stats.stop_reason == result.stop_reason
+    assert result.stats.provider_attempts == 2
+    assert result.stats.known_usage_requests == 1
+    assert result.stats.unknown_usage_requests == 1
+    assert result.stats.total_tokens == 6
+    assert result.stats.provider_attempts == (
+        result.stats.known_usage_requests + result.stats.unknown_usage_requests
+    )
 
 
 @pytest.mark.parametrize(

@@ -106,6 +106,7 @@ class AgentSession:
                 max_steps=self.loop.max_steps,
                 stop_reason=SESSION_LOCK_ERROR_STOP_REASON,
             )
+            state.stats.stop_reason = SESSION_LOCK_ERROR_STOP_REASON
             return AgentRunResult(
                 answer=None,
                 state=state,
@@ -126,6 +127,7 @@ class AgentSession:
                     self._archive = self.store.save(candidate, lease=self._lease)
                 except SessionStoreError as exc:
                     result.state.stop_reason = SESSION_SAVE_ERROR_STOP_REASON
+                    result.state.stats.stop_reason = SESSION_SAVE_ERROR_STOP_REASON
                     return AgentRunResult(
                         answer=result.answer,
                         state=result.state,
