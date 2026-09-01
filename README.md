@@ -180,8 +180,11 @@ uv run coding-agent --help
 | `--command-output-limit` | `65536` 字节 | 本地命令 `stdout` 与 `stderr` 共享上限；范围为 1 至 1048576。 |
 | `--max-steps` | `8` | 每个任务的 Provider 调用次数上限，必须为正整数；临时错误重试也计入。不是工具调用次数上限。 |
 | `--max-retries` | `2` | 每个任务中单次临时 Provider 错误的最大重试次数，必须为非负整数；设为 `0` 关闭自动重试。 |
+| `--max-context-bytes` | `262144` | 每次 Provider 请求前的上下文 UTF-8 字节预算，必须为正整数；超限时不发送请求。 |
 
 `--max-steps` 统计模型请求次数；一次模型响应可以包含多个工具调用，这些调用按模型给出的顺序处理。在 `--chat` 模式中，每个新任务都会重新计算 `--max-steps` 和重试预算。写入和执行工具仍按调用逐次审批。`DEEPSEEK_TIMEOUT_SECONDS` 控制 API 网络请求，与 `--command-timeout` 控制的本地子进程超时无关。
+
+`--max-context-bytes` 是软件级输入预算，按内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数统计。它不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证；预算超限时返回 `context_limit`，不自动裁剪历史、不摘要，也不重试该请求。在 `--chat` 中，正常完成任务的历史会继续计入预算；`/clear` 后只计算新历史。
 
 ## 审批与限制
 

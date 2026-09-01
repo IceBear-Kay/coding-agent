@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from coding_agent.context import (
+    DEFAULT_MAX_CONTEXT_BYTES,
+    ContextBudget,
+    ContextLimitError,
+    ContextSerializationError,
+)
 from coding_agent.errors import FatalProviderError, ProviderError, TransientProviderError
 from coding_agent.models import AgentState, Message, ModelResponse, ToolCall, ToolResult
 from coding_agent.provider import ModelProvider
@@ -22,6 +28,8 @@ INTERRUPTED_STOP_REASON = "interrupted"
 FATAL_ERROR_STOP_REASON = "fatal_error"
 PROVIDER_ERROR_STOP_REASON = "provider_error"
 TRANSIENT_PROVIDER_ERROR_STOP_REASON = "transient_provider_error"
+CONTEXT_LIMIT_STOP_REASON = "context_limit"
+CONTEXT_ERROR_STOP_REASON = "context_error"
 DEFAULT_MAX_STEPS = 8
 NORMAL_FINISH_REASONS = frozenset({None, "stop", "completed"})
 NON_NORMAL_FINISH_REASONS = frozenset({"length", "content_filter", "insufficient_system_resource"})
@@ -79,6 +87,7 @@ class AgentLoop:
         dispatcher: ToolDispatcher | None = None,
         max_steps: int = DEFAULT_MAX_STEPS,
         max_retries: int = 2,
+        max_context_bytes: int = DEFAULT_MAX_CONTEXT_BYTES,
         retry_delay_seconds: float = 0.0,
         sleep: Callable[[float], None] = time.sleep,
         system_prompt: str | None = None,
@@ -99,6 +108,7 @@ class AgentLoop:
         self.dispatcher = dispatcher if dispatcher is not None else ToolDispatcher(self.registry)
         self.max_steps = max_steps
         self.max_retries = max_retries
+        self.context_budget = ContextBudget(max_bytes=max_context_bytes)
         self.retry_delay_seconds = retry_delay_seconds
         self.sleep = sleep
         self.system_prompt = system_prompt
@@ -132,6 +142,19 @@ class AgentLoop:
 
         try:
             while state.step_count < state.max_steps:
+                try:
+                    context_result = self.context_budget.check(state.messages, tool_schemas)
+                except ContextSerializationError as exc:
+                    state.stop_reason = CONTEXT_ERROR_STOP_REASON
+                    return AgentRunResult(answer=None, state=state, error=exc)
+                if context_result.exceeded:
+                    state.stop_reason = CONTEXT_LIMIT_STOP_REASON
+                    error = ContextLimitError(
+                        used_bytes=context_result.used_bytes,
+                        max_bytes=context_result.max_bytes,
+                    )
+                    return AgentRunResult(answer=None, state=state, error=error)
+
                 # Count every provider attempt, including transient failures, so retries
                 # cannot exceed the caller's global invocation budget.
                 state.step_count += 1

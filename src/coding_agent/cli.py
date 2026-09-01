@@ -9,6 +9,7 @@ from typing import Any
 
 from coding_agent.agent import (
     COMPLETED_STOP_REASON,
+    DEFAULT_MAX_CONTEXT_BYTES,
     DEFAULT_MAX_STEPS,
     DEFAULT_SYSTEM_PROMPT,
     AgentEvent,
@@ -99,6 +100,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=_non_negative_int,
         default=2,
         help="临时 Provider 错误的最大重试次数（默认：2）。",
+    )
+    parser.add_argument(
+        "--max-context-bytes",
+        type=_positive_int,
+        default=DEFAULT_MAX_CONTEXT_BYTES,
+        help=f"请求前上下文 UTF-8 字节预算（默认：{DEFAULT_MAX_CONTEXT_BYTES}）。",
     )
     return parser
 
@@ -300,6 +307,7 @@ def main(
             registry=registry,
             max_steps=args.max_steps,
             max_retries=args.max_retries,
+            max_context_bytes=args.max_context_bytes,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
             event_callback=lambda event: _report_event(event, output_fn),
         )

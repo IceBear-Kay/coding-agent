@@ -2,6 +2,8 @@
 
 from coding_agent.agent import (
     COMPLETED_STOP_REASON,
+    CONTEXT_ERROR_STOP_REASON,
+    CONTEXT_LIMIT_STOP_REASON,
     DEFAULT_MAX_STEPS,
     DEFAULT_SYSTEM_PROMPT,
     FATAL_ERROR_STOP_REASON,
@@ -24,6 +26,16 @@ from coding_agent.command_tools import (
     run_command_tool_spec,
 )
 from coding_agent.config import ProviderConfig
+from coding_agent.context import (
+    DEFAULT_MAX_CONTEXT_BYTES,
+    ContextBudget,
+    ContextBudgetResult,
+    ContextLimitError,
+    ContextSerializationError,
+    check_context_budget,
+    measure_context_bytes,
+    serialize_context,
+)
 from coding_agent.file_tools import (
     DEFAULT_MAX_FILE_BYTES,
     EditFileArguments,
@@ -77,6 +89,8 @@ __all__ = [
     "AgentEvent",
     "AgentEventCallback",
     "COMPLETED_STOP_REASON",
+    "CONTEXT_ERROR_STOP_REASON",
+    "CONTEXT_LIMIT_STOP_REASON",
     "DEFAULT_MAX_LIST_ENTRIES",
     "DEFAULT_MAX_FILE_BYTES",
     "DEFAULT_MAX_OUTPUT_CHARS",
@@ -85,6 +99,11 @@ __all__ = [
     "DEFAULT_SYSTEM_PROMPT",
     "DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES",
     "DEFAULT_COMMAND_TIMEOUT_SECONDS",
+    "DEFAULT_MAX_CONTEXT_BYTES",
+    "ContextBudget",
+    "ContextBudgetResult",
+    "ContextLimitError",
+    "ContextSerializationError",
     "EditFileArguments",
     "FATAL_ERROR_STOP_REASON",
     "FakeProvider",
@@ -119,6 +138,7 @@ __all__ = [
     "WorkspaceTraversalError",
     "WriteFileArguments",
     "CommandLimits",
+    "check_context_budget",
     "create_read_only_registry",
     "create_workspace_registry",
     "edit_file_tool_spec",
@@ -126,4 +146,6 @@ __all__ = [
     "request_approval",
     "run_command_tool_spec",
     "write_file_tool_spec",
+    "measure_context_bytes",
+    "serialize_context",
 ]

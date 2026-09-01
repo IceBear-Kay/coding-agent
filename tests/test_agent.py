@@ -7,6 +7,8 @@ import httpx
 import pytest
 
 from coding_agent import (
+    COMPLETED_STOP_REASON,
+    CONTEXT_LIMIT_STOP_REASON,
     AgentEvent,
     AgentLoop,
     AgentState,
@@ -17,7 +19,9 @@ from coding_agent import (
     ModelResponse,
     ToolCall,
     Workspace,
+    create_read_only_registry,
     create_workspace_registry,
+    measure_context_bytes,
 )
 from coding_agent.config import ProviderConfig
 from coding_agent.errors import (
@@ -941,3 +945,138 @@ def test_agent_loop_does_not_dispatch_tools_for_non_normal_finish_reason(
     assert result.state.messages[-1].tool_calls[0].id == "call_should_not_run"
     assert not dispatcher.calls
     assert len(provider.requests) == 1
+
+
+def test_agent_loop_stops_before_first_provider_call_when_context_exceeds_budget(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider([ModelResponse(text="should not run", finish_reason="stop")])
+    loop = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        max_context_bytes=1,
+    )
+
+    result = loop.run("This request is larger than one byte.")
+
+    assert result.stop_reason == CONTEXT_LIMIT_STOP_REASON
+    assert result.state.step_count == 0
+    assert provider.requests == []
+    assert result.error is not None
+    assert "This request" not in str(result.error)
+    assert "context input exceeds byte budget" in str(result.error)
+
+
+def test_agent_loop_keeps_tool_result_when_next_context_check_exceeds_budget(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "notes.txt").write_text("tool result", encoding="utf-8")
+    workspace = Workspace(tmp_path)
+    registry = create_read_only_registry(workspace)
+    task = "Read notes.txt"
+    initial_size = measure_context_bytes([Message(role="user", content=task)], registry.schemas())
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_notes",
+                        name="read_file",
+                        arguments={"path": "notes.txt"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="should not be requested", finish_reason="stop"),
+        ]
+    )
+    loop = AgentLoop(
+        provider,
+        workspace,
+        registry=registry,
+        max_context_bytes=initial_size,
+    )
+
+    result = loop.run(task)
+
+    assert result.stop_reason == CONTEXT_LIMIT_STOP_REASON
+    assert result.state.step_count == 1
+    assert len(provider.requests) == 1
+    tool_message = next(message for message in result.state.messages if message.role == "tool")
+    assert tool_message.tool_call_id == "call_notes"
+    assert tool_message.content == "tool result"
+
+
+def test_agent_loop_keeps_completed_write_when_context_budget_is_exceeded(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace(tmp_path)
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        approval_callback=lambda _: True,
+    )
+    task = "创建 once.py。"
+    tool_call = ToolCall(
+        id="call_write_once",
+        name="write_file",
+        arguments={"path": "once.py", "content": "print(1)\n"},
+    )
+    expected_tool_content = '{"bytes_written":9,"path":"once.py","status":"created"}'
+    messages_after_tool = [
+        Message(role="user", content=task),
+        Message(role="assistant", content=None, tool_calls=[tool_call]),
+        Message(role="tool", tool_call_id=tool_call.id, content=expected_tool_content),
+    ]
+    max_context_bytes = measure_context_bytes(messages_after_tool, registry.schemas()) - 1
+    provider = FakeProvider(
+        [
+            ModelResponse(tool_calls=[tool_call], finish_reason="tool_calls"),
+            ModelResponse(text="不应再次请求", finish_reason="stop"),
+        ]
+    )
+
+    result = AgentLoop(
+        provider,
+        workspace,
+        registry=registry,
+        max_context_bytes=max_context_bytes,
+    ).run(task)
+
+    assert result.stop_reason == CONTEXT_LIMIT_STOP_REASON
+    assert result.state.step_count == 1
+    assert len(provider.requests) == 1
+    assert (tmp_path / "once.py").read_text(encoding="utf-8") == "print(1)\n"
+    assert [
+        message.tool_call_id for message in result.state.messages if message.role == "tool"
+    ] == ["call_write_once"]
+
+
+def test_agent_loop_checks_context_budget_before_each_provider_retry(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [ProviderNetworkError("temporary"), ModelResponse(text="完成", finish_reason="stop")]
+    )
+    loop = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        max_steps=2,
+        max_retries=1,
+    )
+    checks: list[int] = []
+    original_budget = loop.context_budget
+
+    class RecordingBudget:
+        def check(self, messages, tools):
+            result = original_budget.check(messages, tools)
+            checks.append(result.used_bytes)
+            return result
+
+    loop.context_budget = RecordingBudget()
+
+    result = loop.run("重试一次。")
+
+    assert result.stop_reason == COMPLETED_STOP_REASON
+    assert result.state.step_count == 2
+    assert len(provider.requests) == 2
+    assert len(checks) == 2
+    assert checks[0] == checks[1]
