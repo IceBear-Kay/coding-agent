@@ -13,6 +13,7 @@ from coding_agent import (
     Message,
     ModelResponse,
     ToolCall,
+    Usage,
     Workspace,
     create_read_only_registry,
     create_workspace_registry,
@@ -58,6 +59,31 @@ def test_session_preserves_completed_history_and_resets_task_state(tmp_path: Pat
     assert provider.requests[1][0][-1].content == "Second task"
     assert session.state.messages == second.state.messages
     assert session.state.messages is not second.state.messages
+
+
+def test_session_task_stats_are_reset_for_each_task(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                text="First answer",
+                finish_reason="stop",
+                usage=Usage(input_tokens=3, output_tokens=1, total_tokens=4),
+            ),
+            ModelResponse(
+                text="Second answer",
+                finish_reason="stop",
+                usage=Usage(input_tokens=5, output_tokens=2, total_tokens=7),
+            ),
+        ]
+    )
+    session = AgentSession(AgentLoop(provider, Workspace(tmp_path), max_steps=2))
+
+    first = session.run("First task")
+    second = session.run("Second task")
+
+    assert first.stats.provider_attempts == second.stats.provider_attempts == 1
+    assert first.stats.total_tokens == 4
+    assert second.stats.total_tokens == 7
 
 
 def test_session_preserves_tool_protocol_and_reasoning_across_tasks(tmp_path: Path) -> None:
@@ -590,6 +616,7 @@ def test_closed_session_run_is_rejected_before_provider_or_tools(tmp_path: Path)
     result = first.run("不应执行")
 
     assert result.stop_reason == SESSION_LOCK_ERROR_STOP_REASON
+    assert result.stats.stop_reason == result.stop_reason
     assert provider.requests == []
 
 
@@ -604,6 +631,7 @@ def test_closed_session_cannot_run_while_another_instance_holds_lock(tmp_path: P
     result = first.run("不应执行")
 
     assert result.stop_reason == SESSION_LOCK_ERROR_STOP_REASON
+    assert result.stats.stop_reason == result.stop_reason
     assert first_provider.requests == []
     assert resumed_provider.requests == []
     resumed.close()
@@ -674,6 +702,7 @@ def test_persistent_session_save_failure_keeps_real_result_and_old_archive(
     result = session.run("task with real result")
 
     assert result.stop_reason == SESSION_SAVE_ERROR_STOP_REASON
+    assert result.stats.stop_reason == result.stop_reason
     assert isinstance(result.error, SessionStoreError)
     assert result.answer == "answer"
     assert Message(role="user", content="task with real result") in session.messages
@@ -701,6 +730,7 @@ def test_persistent_session_archive_io_failure_keeps_answer_and_old_archive(
     result = session.run("执行并保存")
 
     assert result.stop_reason == SESSION_SAVE_ERROR_STOP_REASON
+    assert result.stats.stop_reason == result.stop_reason
     assert result.answer == "真实答案"
     assert isinstance(result.error, SessionStoreError)
     assert store.load("chat_1", workspace_root=tmp_path) == original

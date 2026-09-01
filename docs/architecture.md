@@ -19,7 +19,7 @@ CLI
 
 - **CLI**：接收任务、工作区和运行参数，按需显示工具过程并显示最终结果。
 - **Agent Loop**：连接模型与工具，追加消息并决定何时结束。
-- **AgentState**：保存消息、步骤、工作区、停止原因和上下文裁剪统计。
+- **AgentState**：保存消息、步骤、工作区、停止原因和上下文裁剪统计；每次任务还记录独立的运行统计。
 - **ModelProvider**：屏蔽模型厂商差异，输出统一 `ModelResponse`。
 - **Tool Registry/Dispatcher**：暴露工具 Schema、验证参数并调度本地实现。
 - **Context Policy**：按 UTF-8 字节预算检查请求上下文；默认 `stop` 在超限时停止，显式 `trim` 时按完整旧任务从最早开始裁剪，当前不提供摘要压缩。
@@ -77,6 +77,7 @@ Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数�
 - `run_command` 接收结构化 argv、工作区内 cwd 和独立 stdin，以 `shell=False` 启动进程；stdout/stderr 共享有界读取预算，并返回退出码、耗时、截断和执行状态。超时、输出超限和中断会触发普通进程树清理。
 - CLI 的 `run_command` 默认超时为 20 秒，可用参数覆盖；正常工具调用和结果摘要默认显示，也可单独隐藏而不改变内部事件或消息历史。
 - Agent Loop 会保留完整对话历史、Assistant Tool Calls、`reasoning_content` 和原始 `tool_call_id`，并区分正常完成、`max_steps`、`interrupted`、Provider 错误及非正常 `finish_reason`。
+- `--show-stats` 展示本次任务的 Provider 请求、工具调度、工具错误、服务端 `usage` Token、上下文字节数和耗时。统计只存在于 `AgentState`/`AgentRunResult`，不进入消息历史；缺失 `usage` 的请求单独标记为未知。
 - 端到端离线测试使用 `FakeProvider` 驱动真实文件和受控本地进程，覆盖读取题目、批准写入、运行失败、精确编辑、再次运行成功以及拒绝和超时路径；OpenAI-compatible 协议使用 `httpx.MockTransport` 验证，不调用真实模型。
 - 当前不删除文件，不提供自动审批、上下文摘要压缩或中断续跑。持久聊天可保存和恢复正常完成任务的完整历史，但不保存 Provider 配置、环境变量、API Key、审批状态或进程对象；本地命令以当前用户权限运行，路径检查、最小环境、资源预算和审批不等同于操作系统沙箱。
 

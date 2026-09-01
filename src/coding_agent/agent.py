@@ -16,7 +16,7 @@ from coding_agent.context import (
     select_context,
 )
 from coding_agent.errors import FatalProviderError, ProviderError, TransientProviderError
-from coding_agent.models import AgentState, Message, ModelResponse, ToolCall, ToolResult
+from coding_agent.models import AgentState, Message, ModelResponse, TaskStats, ToolCall, ToolResult
 from coding_agent.provider import ModelProvider
 from coding_agent.tools import (
     ToolDispatcher,
@@ -76,6 +76,11 @@ class AgentRunResult:
     def stop_reason(self) -> str | None:
         """Expose the terminal state without requiring callers to unpack it."""
         return self.state.stop_reason
+
+    @property
+    def stats(self) -> TaskStats:
+        """Return diagnostics collected for this task only."""
+        return self.state.stats
 
 
 class AgentLoop:
@@ -147,6 +152,15 @@ class AgentLoop:
         self.state = state
         tool_schemas = self.registry.schemas()
         retry_count = 0
+        started_at = time.monotonic()
+
+        def result(
+            answer: str | None = None,
+            error: BaseException | None = None,
+        ) -> AgentRunResult:
+            state.stats.runtime_seconds = max(0.0, time.monotonic() - started_at)
+            state.stats.stop_reason = state.stop_reason
+            return AgentRunResult(answer=answer, state=state, error=error)
 
         try:
             while state.step_count < state.max_steps:
@@ -162,56 +176,78 @@ class AgentLoop:
                         state.context_trimmed_tasks,
                         selection.removed_task_count,
                     )
+                    state.stats.context_trimmed_tasks = state.context_trimmed_tasks
                     context_result = self.context_budget.check(selection.messages, tool_schemas)
+                    state.stats.context_bytes = context_result.used_bytes
+                    state.stats.context_max_bytes = context_result.max_bytes
                 except (ContextHistoryError, ContextSerializationError) as exc:
                     state.stop_reason = CONTEXT_ERROR_STOP_REASON
-                    return AgentRunResult(answer=None, state=state, error=exc)
+                    return result(error=exc)
                 if context_result.exceeded:
                     state.stop_reason = CONTEXT_LIMIT_STOP_REASON
                     error = ContextLimitError(
                         used_bytes=context_result.used_bytes,
                         max_bytes=context_result.max_bytes,
                     )
-                    return AgentRunResult(answer=None, state=state, error=error)
+                    return result(error=error)
 
                 # Count every provider attempt, including transient failures, so retries
                 # cannot exceed the caller's global invocation budget.
                 state.step_count += 1
+                state.stats.provider_attempts += 1
                 try:
                     response = self.provider.complete(list(selection.messages), tool_schemas)
+                except KeyboardInterrupt:
+                    # A started request with no usable response has unknown usage.
+                    state.stats.unknown_usage_requests += 1
+                    raise
                 except TransientProviderError as exc:
+                    state.stats.unknown_usage_requests += 1
                     if retry_count >= self.max_retries or state.step_count >= state.max_steps:
                         state.stop_reason = TRANSIENT_PROVIDER_ERROR_STOP_REASON
-                        return AgentRunResult(answer=None, state=state, error=exc)
+                        return result(error=exc)
                     retry_count += 1
                     delay = self.retry_delay_seconds * (2 ** (retry_count - 1))
                     if delay:
                         self.sleep(delay)
                     continue
                 except FatalProviderError as exc:
+                    state.stats.unknown_usage_requests += 1
                     state.stop_reason = FATAL_ERROR_STOP_REASON
-                    return AgentRunResult(answer=None, state=state, error=exc)
+                    return result(error=exc)
                 except ProviderError as exc:
+                    state.stats.unknown_usage_requests += 1
                     state.stop_reason = PROVIDER_ERROR_STOP_REASON
-                    return AgentRunResult(answer=None, state=state, error=exc)
+                    return result(error=exc)
                 except Exception as exc:
+                    state.stats.unknown_usage_requests += 1
                     state.stop_reason = PROVIDER_ERROR_STOP_REASON
-                    return AgentRunResult(answer=None, state=state, error=exc)
+                    return result(error=exc)
 
                 retry_count = 0
+                if response.usage is None:
+                    state.stats.unknown_usage_requests += 1
+                else:
+                    state.stats.known_usage_requests += 1
+                    state.stats.input_tokens += response.usage.input_tokens
+                    state.stats.output_tokens += response.usage.output_tokens
+                    state.stats.total_tokens += response.usage.total_tokens
                 self._append_assistant_message(state, response)
 
                 if response.finish_reason in NON_NORMAL_FINISH_REASONS:
                     state.stop_reason = response.finish_reason
-                    return AgentRunResult(answer=response.text, state=state)
+                    return result(answer=response.text)
 
                 if not response.tool_calls:
                     state.stop_reason = self._finish_stop_reason(response)
-                    return AgentRunResult(answer=response.text, state=state)
+                    return result(answer=response.text)
 
                 for tool_call in response.tool_calls:
                     self._emit_event(AgentEvent(kind="tool_call", tool_call=tool_call))
+                    state.stats.tool_dispatches += 1
                     tool_result = self.dispatcher.dispatch(tool_call)
+                    if tool_result.is_error:
+                        state.stats.tool_errors += 1
                     state.messages.append(
                         Message(
                             role="tool",
@@ -229,10 +265,10 @@ class AgentLoop:
 
                 if state.step_count >= state.max_steps:
                     state.stop_reason = MAX_STEPS_STOP_REASON
-                    return AgentRunResult(answer=None, state=state)
+                    return result()
         except KeyboardInterrupt as exc:
             state.stop_reason = INTERRUPTED_STOP_REASON
-            return AgentRunResult(answer=None, state=state, error=exc)
+            return result(error=exc)
 
         # The loop always returns from the body because max_steps is positive.
         raise RuntimeError("Agent loop exited without a terminal result")

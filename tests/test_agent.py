@@ -21,6 +21,7 @@ from coding_agent import (
     Message,
     ModelResponse,
     ToolCall,
+    Usage,
     Workspace,
     create_read_only_registry,
     create_workspace_registry,
@@ -199,6 +200,43 @@ def test_agent_loop_records_tool_result_before_result_event_interrupt(tmp_path: 
     )
     assert [event.kind for event in events] == ["tool_call", "tool_result"]
     assert len(provider.requests) == 1
+
+
+def test_agent_loop_approval_interrupt_does_not_add_unknown_request(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+
+    def interrupt(_: ApprovalRequest) -> bool:
+        raise KeyboardInterrupt
+
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        approval_callback=interrupt,
+    )
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_write",
+                        name="write_file",
+                        arguments={"path": "created.txt", "content": "saved"},
+                    )
+                ],
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=8, output_tokens=3, total_tokens=11),
+            )
+        ]
+    )
+
+    result = AgentLoop(provider, workspace, registry=registry).run("Create created.txt")
+
+    assert result.stop_reason == "interrupted"
+    assert result.stats.provider_attempts == 1
+    assert result.stats.known_usage_requests == 1
+    assert result.stats.unknown_usage_requests == 0
+    assert result.stats.stop_reason == result.stop_reason
+    assert not (tmp_path / "created.txt").exists()
 
 
 def test_agent_loop_round_trips_approved_file_result(tmp_path: Path) -> None:
@@ -835,6 +873,117 @@ def test_agent_loop_retries_transient_provider_error_within_budget(tmp_path: Pat
     assert delays == [0.5]
 
 
+def test_agent_loop_retry_wait_interrupt_is_not_counted_as_another_request(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider([ProviderNetworkError("temporary")])
+
+    def interrupt(_: float) -> None:
+        raise KeyboardInterrupt
+
+    result = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        max_retries=1,
+        retry_delay_seconds=1.0,
+        sleep=interrupt,
+    ).run("Retry once")
+
+    assert result.stop_reason == "interrupted"
+    assert result.stats.provider_attempts == 1
+    assert result.stats.known_usage_requests == 0
+    assert result.stats.unknown_usage_requests == 1
+    assert result.stats.provider_attempts == (
+        result.stats.known_usage_requests + result.stats.unknown_usage_requests
+    )
+
+
+def test_agent_loop_collects_task_runtime_usage_and_tool_counts(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("Project contents", encoding="utf-8")
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(id="call_readme", name="read_file", arguments={"path": "README.md"})
+                ],
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=10, output_tokens=2, total_tokens=12),
+            ),
+            ModelResponse(
+                text="Done",
+                finish_reason="stop",
+                usage=Usage(input_tokens=20, output_tokens=4, total_tokens=24),
+            ),
+        ]
+    )
+
+    result = AgentLoop(provider, Workspace(tmp_path), max_steps=3).run("Read README.md")
+
+    assert result.stop_reason == "completed"
+    assert result.stats.provider_attempts == 2
+    assert result.stats.tool_dispatches == 1
+    assert result.stats.tool_errors == 0
+    assert result.stats.known_usage_requests == 2
+    assert result.stats.unknown_usage_requests == 0
+    assert result.stats.input_tokens == 30
+    assert result.stats.output_tokens == 6
+    assert result.stats.total_tokens == 36
+    assert result.stats.context_bytes is not None
+    assert result.stats.context_max_bytes == 262144
+    assert result.stats.runtime_seconds >= 0
+
+
+def test_agent_loop_marks_missing_usage_without_treating_it_as_zero(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            ProviderNetworkError("temporary"),
+            ModelResponse(
+                text="Done",
+                finish_reason="stop",
+                usage=Usage(input_tokens=7, output_tokens=2, total_tokens=9),
+            ),
+        ]
+    )
+
+    result = AgentLoop(provider, Workspace(tmp_path), max_retries=1).run("Finish")
+
+    assert result.stop_reason == "completed"
+    assert result.stats.provider_attempts == 2
+    assert result.stats.known_usage_requests == 1
+    assert result.stats.unknown_usage_requests == 1
+    assert result.stats.input_tokens == 7
+    assert result.stats.known_input_tokens == 7
+
+
+def test_agent_loop_stats_record_context_rejection_without_provider_attempt(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    result = AgentLoop(provider, Workspace(tmp_path), max_context_bytes=1).run("A task")
+
+    assert result.stop_reason == CONTEXT_LIMIT_STOP_REASON
+    assert result.stats.provider_attempts == 0
+    assert result.stats.unknown_usage_requests == 0
+    assert result.stats.context_bytes is not None
+    assert result.stats.context_bytes > result.stats.context_max_bytes
+
+
+def test_agent_loop_stats_count_tool_errors_as_dispatches(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_missing", name="missing", arguments={})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="The tool failed.", finish_reason="stop"),
+        ]
+    )
+
+    result = AgentLoop(provider, Workspace(tmp_path), max_steps=3).run("Use the tool")
+
+    assert result.stop_reason == "completed"
+    assert result.stats.tool_dispatches == 1
+    assert result.stats.tool_errors == 1
+
+
 def test_agent_loop_does_not_retry_past_max_steps(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
@@ -893,6 +1042,48 @@ def test_agent_loop_handles_keyboard_interrupt_without_traceback(tmp_path: Path)
     assert result.stop_reason == "interrupted"
     assert isinstance(result.error, KeyboardInterrupt)
     assert result.state.step_count == 1
+
+
+def test_agent_loop_counts_provider_keyboard_interrupt_as_unknown_usage(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider([KeyboardInterrupt()])
+
+    result = AgentLoop(provider, Workspace(tmp_path)).run("Stop me safely.")
+
+    assert result.stop_reason == "interrupted"
+    assert result.stats.stop_reason == result.stop_reason
+    assert result.stats.provider_attempts == 1
+    assert result.stats.known_usage_requests == 0
+    assert result.stats.unknown_usage_requests == 1
+    assert result.stats.provider_attempts == (
+        result.stats.known_usage_requests + result.stats.unknown_usage_requests
+    )
+
+
+def test_agent_loop_preserves_known_usage_before_provider_interrupt(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_list", name="list_files", arguments={})],
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=4, output_tokens=2, total_tokens=6),
+            ),
+            KeyboardInterrupt(),
+        ]
+    )
+
+    result = AgentLoop(provider, Workspace(tmp_path), max_steps=2).run("two-step task")
+
+    assert result.stop_reason == "interrupted"
+    assert result.stats.stop_reason == result.stop_reason
+    assert result.stats.provider_attempts == 2
+    assert result.stats.known_usage_requests == 1
+    assert result.stats.unknown_usage_requests == 1
+    assert result.stats.total_tokens == 6
+    assert result.stats.provider_attempts == (
+        result.stats.known_usage_requests + result.stats.unknown_usage_requests
+    )
 
 
 @pytest.mark.parametrize(
