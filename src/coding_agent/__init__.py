@@ -36,11 +36,13 @@ from coding_agent.models import (
     AgentState,
     Message,
     ModelResponse,
+    SessionState,
     ToolCall,
     ToolResult,
     Usage,
 )
 from coding_agent.provider import FakeProvider, ModelProvider, OpenAICompatibleProvider
+from coding_agent.session import AgentSession
 from coding_agent.tools import (
     DEFAULT_MAX_LIST_ENTRIES,
     DEFAULT_MAX_OUTPUT_CHARS,
@@ -71,6 +73,7 @@ __all__ = [
     "AgentState",
     "AgentLoop",
     "AgentRunResult",
+    "AgentSession",
     "AgentEvent",
     "AgentEventCallback",
     "COMPLETED_STOP_REASON",
@@ -93,6 +96,7 @@ __all__ = [
     "Message",
     "ModelProvider",
     "ModelResponse",
+    "SessionState",
     "OpenAICompatibleProvider",
     "ProviderConfig",
     "PROVIDER_ERROR_STOP_REASON",

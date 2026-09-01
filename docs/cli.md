@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`coding-agent` 每次运行处理一个任务。默认只提供工作区内的 `list_files` 和 `read_file`；显式使用 `--allow-write` 后，模型才可以申请调用 `write_file` 和 `edit_file`，显式使用 `--allow-exec` 后才可以申请调用 `run_command`。
+`coding-agent` 默认每次运行处理一个任务；显式使用 `--chat` 后，可以在同一进程内连续输入任务并保留正常完成的会话历史。默认只提供工作区内的 `list_files` 和 `read_file`；显式使用 `--allow-write` 后，模型才可以申请调用 `write_file` 和 `edit_file`，显式使用 `--allow-exec` 后才可以申请调用 `run_command`。
 
 ## 直接运行
 
@@ -16,12 +16,21 @@ uv run --env-file .env coding-agent "请读取 docs/architecture.md 并总结项
 uv run --env-file .env coding-agent --workspace .
 ```
 
+上述两种方式都只运行一个任务。连续任务需要显式使用 `--chat`，且不能同时提供位置任务：
+
+```powershell
+uv run --env-file .env coding-agent --chat --workspace . --max-steps 8
+```
+
+进入会话后，普通非空文本会启动一个新任务；`/clear` 清空内存历史，`/exit` 正常退出。空输入不调用 Provider，等待任务时收到 EOF 也会正常退出。
+
 ## 参数速查
 
-- `task`：一次任务的文本；省略时从终端读取。
+- `task`：一次任务的文本；省略时从终端读取，不能与 `--chat` 同时使用。
+- `--chat`：进入同一进程内的连续任务会话；默认关闭。
 - `--workspace` / `-w`：工作区目录，默认是当前目录。
-- `--max-steps`：本次运行允许的 Provider 调用次数，默认 8；临时错误重试也计入预算。
-- `--max-retries`：单次临时 Provider 错误最多重试次数，默认 2；设为 0 可关闭自动重试。
+- `--max-steps`：每个任务允许的 Provider 调用次数，默认 8；临时错误重试也计入预算。
+- `--max-retries`：每个任务中单次临时 Provider 错误最多重试次数，默认 2；设为 0 可关闭自动重试。
 - `--allow-write`：开放 `write_file` 和 `edit_file`，每个副作用操作仍需单独审批。
 - `--allow-exec`：开放 `run_command`，每个命令仍需单独审批。
 - `--command-timeout`：命令超时上限，默认 10 秒，最大 60 秒。
@@ -77,6 +86,14 @@ uv run --env-file .env coding-agent "请创建 solution.py，读取两个整数�
 
 当前版本不删除文件，也不提供自动审批。经批准的本地程序仍以当前用户权限运行，可以读写该用户有权访问的位置；`cwd` 限制、参数校验和进程清理用于降低误操作风险，不构成操作系统沙箱，也不保证约束刻意脱离进程组或改变权限的恶意程序。
 
+## 连续任务会话
+
+`--chat` 使用一份内存中的权威消息历史。每个新任务创建独立的任务状态，因此 Provider 调用次数和临时错误重试预算都会从零开始；模型请求仍能看到此前正常完成任务的 `system`、`user`、`assistant` 和 `tool` 消息，包括原始 `tool_call_id` 与必要的 `reasoning_content`。系统消息不会在每个任务前重复添加。
+
+只有停止原因为 `completed` 的任务会提交到会话历史。`max_steps`、Provider 错误、`length`、`content_filter`、`insufficient_system_resource` 或 `Ctrl+C` 会结束整个会话，不继续读取下一任务，也不会把不完整的工具调用序列用于后续请求。已经完成的工具操作及其真实结果不会回滚或伪造，尚未执行的工具不会继续执行。
+
+`/clear` 清空内存历史，但保留工作区、Provider 配置、工具开关和命令资源限制，不删除任何文件。会话不会写入磁盘，退出进程后不能恢复；当前也不提供自动裁剪、摘要压缩、保存或中断续跑。
+
 ## Provider 配置
 
 未通过测试注入 Provider 时，CLI 从环境变量创建 DeepSeek Provider。仓库提供不含凭据的 `.env.example`，程序不会自动搜索或读取 `.env`；需要使用配置文件时，必须由 `uv` 显式加载：
@@ -115,7 +132,7 @@ print("DeepSeek 配置完整")
 
 `.env.example` 中的配置示例为：`DEEPSEEK_BASE_URL=https://api.deepseek.com`、`DEEPSEEK_MODEL=deepseek-v4-flash`、`DEEPSEEK_TIMEOUT_SECONDS=60`，`DEEPSEEK_API_KEY` 保持为空。真实 API Key 只应通过未跟踪的 `.env` 或当前会话的隐藏输入提供。
 
-`--max-steps` 限制一次运行的 Provider 调用次数，临时错误重试也计入该上限。`--max-retries` 设置每次临时错误最多重试次数。
+`--max-steps` 限制一个任务的 Provider 调用次数，临时错误重试也计入该上限。`--max-retries` 设置该任务中每次临时错误最多重试次数；`--chat` 中的下一个任务会重新计算这两项预算。
 
 CLI 会以非零退出码报告 `max_steps`、`interrupted`、Provider 错误和非正常模型停止原因；文件修改和本地命令均不会自动批准。工具执行错误会作为结构化结果交回模型，由模型决定是否说明、修正参数或结束任务，不会自动重试副作用命令。
 

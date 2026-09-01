@@ -1,4 +1,4 @@
-"""Command-line entry point for one coding-agent task."""
+"""Command-line entry point for coding-agent tasks and in-memory chat sessions."""
 
 import argparse
 import json
@@ -25,6 +25,7 @@ from coding_agent.config import ProviderConfig
 from coding_agent.errors import ProviderError
 from coding_agent.file_tools import create_workspace_registry
 from coding_agent.provider import ModelProvider, OpenAICompatibleProvider
+from coding_agent.session import AgentSession
 from coding_agent.tools import Workspace
 
 _STRUCTURED_RESULT_TOOLS = frozenset({"write_file", "edit_file", "run_command"})
@@ -44,12 +45,17 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the parser separately so help and argument behavior are testable."""
     parser = argparse.ArgumentParser(
         prog="coding-agent",
-        description="在工作区运行一次 coding-agent 任务。",
+        description="在工作区运行 coding-agent 任务。",
     )
     parser.add_argument(
         "task",
         nargs="?",
-        help="发送给 agent 的任务；省略后将交互式输入。",
+        help="发送给 agent 的单次任务；省略后将交互式输入，不能与 --chat 同时使用。",
+    )
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="进入同一进程内的连续任务会话；不能与位置任务同时使用。",
     )
     parser.add_argument(
         "--workspace",
@@ -210,6 +216,35 @@ def _stdin_is_interactive() -> bool:
         return False
 
 
+def _run_chat(
+    session: AgentSession,
+    input_fn: Callable[[str], str],
+    output_fn: Callable[[str], Any],
+    error_fn: Callable[[str], Any],
+) -> int:
+    """Read tasks until an explicit exit, EOF, interrupt, or abnormal result."""
+    while True:
+        try:
+            raw_task = input_fn("任务（/clear 清空历史，/exit 退出）: ")
+        except EOFError:
+            return 0
+
+        task = raw_task.strip()
+        if task == "/exit":
+            return 0
+        if task == "/clear":
+            session.clear()
+            output_fn("会话历史已清空")
+            continue
+        if not task:
+            continue
+
+        result = session.run(task)
+        exit_code = _report_result(result, output_fn, error_fn)
+        if exit_code != 0:
+            return exit_code
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -218,7 +253,7 @@ def main(
     output_fn: Callable[[str], Any] = print,
     error_fn: Callable[[str], Any] | None = None,
 ) -> int:
-    """Run one task and return a process-style exit code.
+    """Run one task or an in-memory chat session and return a process-style exit code.
 
     ``provider`` is injectable for offline tests; normal CLI use creates the configured
     OpenAI-compatible provider from the environment.
@@ -227,10 +262,14 @@ def main(
 
     try:
         args = build_parser().parse_args(argv)
+        if args.chat and args.task is not None:
+            report_error("错误: --chat 不能与位置任务同时使用")
+            return 2
+
         task = args.task
-        if task is None:
+        if task is None and not args.chat:
             task = input_fn("任务: ").strip()
-        if not task:
+        if not args.chat and not task:
             report_error("错误: task 不能为空")
             return 2
 
@@ -255,7 +294,7 @@ def main(
             command_limits=command_limits,
         )
         selected_provider = provider if provider is not None else _default_provider()
-        result = AgentLoop(
+        loop = AgentLoop(
             selected_provider,
             workspace,
             registry=registry,
@@ -263,7 +302,16 @@ def main(
             max_retries=args.max_retries,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
             event_callback=lambda event: _report_event(event, output_fn),
-        ).run(task)
+        )
+        if args.chat:
+            return _run_chat(
+                AgentSession(loop),
+                input_fn,
+                output_fn,
+                report_error,
+            )
+
+        result = loop.run(task)
         return _report_result(result, output_fn, report_error)
     except KeyboardInterrupt:
         _report_interrupt(report_error)

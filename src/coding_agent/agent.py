@@ -1,7 +1,7 @@
 """The minimal provider-tool agent loop."""
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -105,8 +105,13 @@ class AgentLoop:
         self.event_callback = event_callback
         self.state: AgentState | None = None
 
-    def run(self, task: str) -> AgentRunResult:
-        """Execute one task and return its answer and complete conversation state."""
+    def run(
+        self,
+        task: str,
+        *,
+        history: Sequence[Message] | None = None,
+    ) -> AgentRunResult:
+        """Execute one task, optionally continuing from completed conversation history."""
         if not isinstance(task, str) or not task.strip():
             raise ValueError("task must be a non-empty string")
 
@@ -114,7 +119,11 @@ class AgentLoop:
             workspace_root=Path(self.workspace.root),
             max_steps=self.max_steps,
         )
-        if self.system_prompt is not None:
+        if history is not None:
+            state.messages.extend(message.model_copy(deep=True) for message in history)
+        if self.system_prompt is not None and not any(
+            message.role == "system" for message in state.messages
+        ):
             state.messages.append(Message(role="system", content=self.system_prompt))
         state.messages.append(Message(role="user", content=task))
         self.state = state

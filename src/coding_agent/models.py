@@ -57,6 +57,12 @@ class AgentState(BaseModel):
     stop_reason: str | None = Field(default=None, min_length=1)
 
 
+class SessionState(BaseModel):
+    """In-memory history committed only after a task completes normally."""
+
+    messages: list[Message] = Field(default_factory=list)
+
+
 class ToolResult(BaseModel):
     """The output produced for a specific tool invocation."""
 
