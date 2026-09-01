@@ -22,6 +22,7 @@ def test_package_exports_core_public_types() -> None:
         ModelResponse,
         OpenAICompatibleProvider,
         ProviderConfig,
+        ReadDocumentArguments,
         RunCommandArguments,
         ToolCall,
         ToolOutput,
@@ -48,6 +49,7 @@ def test_package_exports_core_public_types() -> None:
     assert coding_agent.LocalCommandRunner is LocalCommandRunner
     assert coding_agent.ModelProvider is ModelProvider
     assert coding_agent.ModelResponse is ModelResponse
+    assert coding_agent.ReadDocumentArguments is ReadDocumentArguments
     assert coding_agent.OpenAICompatibleProvider is OpenAICompatibleProvider
     assert coding_agent.ProviderConfig is ProviderConfig
     assert coding_agent.RunCommandArguments is RunCommandArguments

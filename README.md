@@ -1,6 +1,6 @@
 # coding-agent
 
-`coding-agent` 是一个在本地工作区运行的 Coding Agent：模型读取任务和文件，按需请求本地工具，并根据真实工具结果继续处理。当前支持读取 UTF-8 文本文件、经用户批准创建和精确修改文件、经用户批准执行本地命令，以及内存或磁盘持久化的连续任务会话。
+`coding-agent` 是一个在本地工作区运行的 Coding Agent：模型读取任务和文件，按需请求本地工具，并根据真实工具结果继续处理。当前支持读取 UTF-8 文本文件以及文本型 PDF/DOCX、经用户批准创建和精确修改文件、经用户批准执行本地命令，以及内存或磁盘持久化的连续任务会话。
 
 ## 环境要求
 
@@ -121,7 +121,7 @@ uv run --env-file .env coding-agent '读取 notes.md 并用中文总结文件内
 uv run coding-agent '读取 notes.md 并用中文总结文件内容。' --workspace $demo --max-steps 8
 ```
 
-CLI 默认开放 `list_files`、`read_file`、`write_file`、`edit_file` 和 `run_command`。写入、修改和执行仍必须由你逐次审批；可用 `--no-write`、`--no-exec` 或 `--read-only` 明确关闭对应工具。
+CLI 默认开放 `list_files`、`read_file`、`read_document`、`write_file`、`edit_file` 和 `run_command`。`read_document` 只读提取文本型 PDF 与 DOCX，不需要写入或执行开关。写入、修改和执行仍必须由你逐次审批；可用 `--no-write`、`--no-exec` 或 `--read-only` 明确关闭对应工具。
 
 ## 常用操作
 
@@ -130,6 +130,15 @@ CLI 默认开放 `list_files`、`read_file`、`write_file`、`edit_file` 和 `ru
 ```powershell
 uv run --env-file .env coding-agent '读取 notes.md，列出其中的主要信息。' --workspace $demo
 ```
+
+读取文本型 PDF 或 DOCX（只读，不会修改原文件）：
+
+```powershell
+uv run --env-file .env coding-agent '读取 handbook.pdf 的第 1 到 3 页并总结要点。' --workspace $demo --max-steps 8
+uv run --env-file .env coding-agent '读取 report.docx 并按正文顺序概括段落和简单表格。' --workspace $demo --max-steps 8
+```
+
+文档读取受固定资源限制：单个源文件最多 5 MiB，PDF 单次最多 20 页，提取文本最多 32000 个字符。仅支持文本型 PDF 和简单 DOCX；不提供 OCR、图片理解、旧版 `.doc`、`.docm`、宏执行或复杂版式还原。损坏、加密、无文字层、越界路径和资源超限会返回结构化错误，原文档保持不变。
 
 创建或精确修改文件。每一次 `write_file` 或 `edit_file` 都会显示预览并等待确认：
 

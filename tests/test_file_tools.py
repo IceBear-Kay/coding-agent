@@ -956,5 +956,11 @@ def test_workspace_registry_only_exposes_mutations_when_enabled(tmp_path: Path) 
     read_only_names = [spec.name for spec in create_workspace_registry(workspace)]
     writable_names = [spec.name for spec in create_workspace_registry(workspace, allow_write=True)]
 
-    assert read_only_names == ["list_files", "read_file"]
-    assert writable_names == ["list_files", "read_file", "write_file", "edit_file"]
+    assert read_only_names == ["list_files", "read_file", "read_document"]
+    assert writable_names == [
+        "list_files",
+        "read_file",
+        "read_document",
+        "write_file",
+        "edit_file",
+    ]
