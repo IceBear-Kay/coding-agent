@@ -1,32 +1,32 @@
-## Summary
+## 概要
 
-<!-- What changed and why? Keep this concise. -->
+<!-- 简要说明做了什么以及为什么。 -->
 
-## Related issue
+## 关联 Issue
 
 Refs #
 
-## Changes
+## 变更内容
 
 -
 
-## Validation
+## 验证
 
-<!-- List exact commands and results. -->
+<!-- 列出实际执行的命令和结果。 -->
 
-- [ ] `uv run ruff check .` or not yet applicable
-- [ ] `uv run ruff format --check .` or not yet applicable
-- [ ] `uv run pytest` or not yet applicable
-- [ ] Other relevant verification is documented below
+- [ ] `uv run ruff check .`，或说明当前不适用。
+- [ ] `uv run ruff format --check .`，或说明当前不适用。
+- [ ] `uv run pytest`，或说明当前不适用。
+- [ ] 其他相关验证已在下方记录。
 
-## Risk and limitations
+## 风险与限制
 
-<!-- Note behavior changes, known limitations, migration needs, or write None. -->
+<!-- 说明行为变化、已知限制和迁移要求；没有则填写“无”。 -->
 
-## Self-review
+## 自检
 
-- [ ] The PR matches one Issue and contains no unrelated changes.
-- [ ] New behavior has tests, or the reason tests are not applicable is explained.
-- [ ] Documentation matches the implementation.
-- [ ] No API key, `.env`, `.local/`, personal file, or secret is included.
-- [ ] I reviewed the full diff and did not rewrite pushed history.
+- [ ] PR 对应一个 Issue，且不包含无关变更。
+- [ ] 新行为已添加测试，或已说明不适用测试的原因。
+- [ ] 文档与实现一致。
+- [ ] 未包含 API Key、`.env`、`.local/`、个人文件或其他敏感信息。
+- [ ] 已检查完整差异，未改写已推送历史。

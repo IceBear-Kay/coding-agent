@@ -13,14 +13,18 @@
 
 普通任务从最新 `develop` 创建临时分支，PR 目标为 `develop`。发布通过 `develop -> main` 的 PR 完成。
 
-`main` 是仓库默认分支。由于功能 PR 合入的是 `develop`，GitHub 不会通过 `Closes #<issue>` 自动关闭 Issue。PR 合并后，应在关联 Issue 中评论对应 PR 已合入，并手动关闭该 Issue。
+`main` 是仓库默认分支。由于功能 PR 合入的是 `develop`，GitHub 不会在本项目流程中自动关闭 Issue。PR 合并后，应在关联 Issue 中评论对应 PR 已合入，并手动关闭该 Issue。
 
 ## 语言规范
 
-- Issue 正文、PR 正文、README 和公开说明文档统一使用专业、自然、成熟的中文。
-- 不要求为英文技术术语额外添加中文释义，避免写成教学材料。
-- 文件名、代码、命令、配置项、程序标识符、Commit 标题和 PR 标题继续使用英文。
-- 不要为了翻译而修改代码、配置键或 CI 检查名称。
+- Issue 标题使用英文动词开头的简短句子；不添加 `[Feature]:`、`[Bug]:`、`[Task]:` 或 `feat:` 等分类前缀，任务分类由现有 GitHub 标签表达。
+- 里程碑名称使用 `M<n> - <English title>` 格式，例如 `M4 - Interactive Sessions and Runtime Configuration`。
+- Commit 标题和 PR 标题使用英文 Conventional Commits 格式。
+- Issue/PR 正文、模板提示、README 和面向用户的公开说明统一使用专业、自然、成熟的中文，章节标题也保持中文一致。
+- 文件名、代码、字段 ID、配置键、命令、GitHub 标签和 CI 检查名称保持原样；不要为了翻译而修改这些标识符。
+- 英文技术术语的教学性中文释义只用于与用户的交流，不作为项目文档要求。
+- 功能 PR 使用 `Refs #<issue-number>` 关联 Issue；合入 `develop` 后，按确认流程评论对应 PR 并手动关闭 Issue。
+- 交付前检查 Issue 标题、里程碑名称、PR 标题与正文、模板及状态说明的一致性。
 
 ## Issue and PR size
 
