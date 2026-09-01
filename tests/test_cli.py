@@ -5,9 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from coding_agent.agent import DEFAULT_SYSTEM_PROMPT
 from coding_agent.cli import build_parser, main
-from coding_agent.models import ModelResponse, ToolCall
+from coding_agent.context import measure_context_bytes
+from coding_agent.models import Message, ModelResponse, ToolCall
 from coding_agent.provider import FakeProvider
+from coding_agent.tools import Workspace, create_read_only_registry
 
 
 def test_cli_parser_accepts_task_workspace_limits_and_tool_flags() -> None:
@@ -44,6 +47,45 @@ def test_cli_parser_accepts_chat_mode() -> None:
 
     assert args.chat is True
     assert args.task is None
+
+
+def test_cli_parser_accepts_context_budget() -> None:
+    args = build_parser().parse_args(["--max-context-bytes", "4096"])
+
+    assert args.max_context_bytes == 4096
+
+
+def test_cli_rejects_non_positive_context_budget_before_provider_call(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    errors: list[str] = []
+
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            ["Inspect", "--workspace", str(tmp_path), "--max-context-bytes", "0"],
+            provider=provider,
+            error_fn=errors.append,
+        )
+
+    assert exc_info.value.code == 2
+    assert provider.requests == []
+
+
+def test_cli_reports_context_limit_without_exposing_task_content(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    errors: list[str] = []
+    task = "private task content that must not be echoed"
+
+    exit_code = main(
+        [task, "--workspace", str(tmp_path), "--max-context-bytes", "1"],
+        provider=provider,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 1
+    assert len(provider.requests) == 0
+    assert errors[0].startswith("停止原因: context_limit")
+    assert "context input exceeds byte budget" in errors[0]
+    assert task not in errors[0]
 
 
 def test_cli_chat_rejects_positional_task_without_provider_call(tmp_path: Path) -> None:
@@ -122,6 +164,65 @@ def test_cli_chat_clear_discards_history_without_calling_provider(tmp_path: Path
     ]
     assert [message.role for message in provider.requests[1][0]] == ["system", "user"]
     assert provider.requests[1][0][-1].content == "新任务"
+
+
+def test_cli_chat_clear_allows_new_task_after_history_budget_would_be_exceeded(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(text="旧回答", finish_reason="stop"),
+            ModelResponse(text="新回答", finish_reason="stop"),
+        ]
+    )
+    workspace = Workspace(tmp_path)
+    registry = create_read_only_registry(workspace)
+    system = Message(role="system", content=DEFAULT_SYSTEM_PROMPT)
+    old_task = "旧任务"
+    new_task = "新任务"
+    budget = measure_context_bytes(
+        [system, Message(role="user", content=new_task)],
+        registry.schemas(),
+    )
+    accumulated = measure_context_bytes(
+        [
+            system,
+            Message(role="user", content=old_task),
+            Message(role="assistant", content="旧回答"),
+            Message(role="user", content=new_task),
+        ],
+        registry.schemas(),
+    )
+    assert accumulated > budget
+    inputs = iter([old_task, "/clear", new_task, "/exit"])
+    output: list[str] = []
+
+    exit_code = main(
+        [
+            "--chat",
+            "--workspace",
+            str(tmp_path),
+            "--max-steps",
+            "1",
+            "--max-context-bytes",
+            str(budget),
+        ],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert len(provider.requests) == 2
+    assert [message.role for message in provider.requests[1][0]] == ["system", "user"]
+    assert provider.requests[1][0][-1].content == new_task
+    assert output == [
+        "旧回答",
+        "停止原因: completed",
+        "会话历史已清空",
+        "新回答",
+        "停止原因: completed",
+    ]
 
 
 def test_cli_chat_eof_and_empty_input_do_not_call_provider(tmp_path: Path) -> None:

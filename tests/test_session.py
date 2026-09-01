@@ -13,7 +13,9 @@ from coding_agent import (
     ModelResponse,
     ToolCall,
     Workspace,
+    create_read_only_registry,
     create_workspace_registry,
+    measure_context_bytes,
 )
 from coding_agent.config import ProviderConfig
 from coding_agent.errors import ProviderNetworkError
@@ -145,6 +147,50 @@ def test_session_max_steps_is_scoped_to_each_task(tmp_path: Path) -> None:
     assert provider.requests[1][0][0].content == "第二项重新开始计数。"
     assert session.messages == completed.state.messages
     assert all(message.content != "第一项触发步数上限。" for message in session.messages)
+
+
+def test_session_context_budget_applies_to_accumulated_history(tmp_path: Path) -> None:
+    workspace = Workspace(tmp_path)
+    registry = create_read_only_registry(workspace)
+    first_task = "第一项"
+    second_task = "第二项"
+    third_task = "第三项"
+    first_answer = "第一项完成"
+    second_answer = "第二项完成"
+    budget_messages = [
+        Message(role="user", content=first_task),
+        Message(role="assistant", content=first_answer),
+        Message(role="user", content=second_task),
+    ]
+    max_context_bytes = measure_context_bytes(budget_messages, registry.schemas())
+    provider = FakeProvider(
+        [
+            ModelResponse(text=first_answer, finish_reason="stop"),
+            ModelResponse(text=second_answer, finish_reason="stop"),
+            ModelResponse(text="不应请求", finish_reason="stop"),
+        ]
+    )
+    session = AgentSession(
+        AgentLoop(
+            provider,
+            workspace,
+            registry=registry,
+            max_steps=1,
+            max_context_bytes=max_context_bytes,
+        )
+    )
+
+    first = session.run(first_task)
+    second = session.run(second_task)
+    third = session.run(third_task)
+
+    assert first.stop_reason == second.stop_reason == "completed"
+    assert second.state.step_count == 1
+    assert third.stop_reason == "context_limit"
+    assert third.state.step_count == 0
+    assert len(provider.requests) == 2
+    assert session.messages == second.state.messages
+    assert third_task not in [message.content for message in session.messages]
 
 
 def test_session_retry_budget_resets_for_next_task(tmp_path: Path) -> None:
