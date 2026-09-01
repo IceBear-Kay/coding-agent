@@ -1,20 +1,19 @@
-name: Bug report
+name: 缺陷报告
 description: 报告一个可复现的缺陷
-title: "[Bug]: "
 labels:
   - type:bug
 body:
   - type: textarea
     id: summary
     attributes:
-      label: Summary
+      label: 问题概述
       description: 简洁说明实际问题。
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
-      label: Reproduction
+      label: 复现步骤
       description: 提供最小复现步骤、输入和环境。
       placeholder: |
         1. ...
@@ -24,21 +23,21 @@ body:
   - type: textarea
     id: expected
     attributes:
-      label: Expected behavior
+      label: 预期行为
       description: 正确行为应该是什么？
     validations:
       required: true
   - type: textarea
     id: actual
     attributes:
-      label: Actual behavior
+      label: 实际行为
       description: 实际发生了什么？可附去除敏感信息的日志。
     validations:
       required: true
   - type: textarea
     id: acceptance
     attributes:
-      label: Acceptance criteria
+      label: 验收标准
       description: 包含回归测试在内的修复完成条件。
       placeholder: |
         - [ ] 问题已修复
@@ -48,5 +47,5 @@ body:
   - type: textarea
     id: non_goals
     attributes:
-      label: Non-goals
+      label: 非目标
       description: 本次修复不包含哪些重构或功能？
