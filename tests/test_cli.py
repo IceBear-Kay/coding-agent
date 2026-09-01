@@ -39,6 +39,145 @@ def test_cli_parser_accepts_task_workspace_limits_and_tool_flags() -> None:
     assert args.max_retries == 0
 
 
+def test_cli_parser_accepts_chat_mode() -> None:
+    args = build_parser().parse_args(["--chat"])
+
+    assert args.chat is True
+    assert args.task is None
+
+
+def test_cli_chat_rejects_positional_task_without_provider_call(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    errors: list[str] = []
+
+    exit_code = main(
+        ["--chat", "already supplied", "--workspace", str(tmp_path)],
+        provider=provider,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 2
+    assert errors == ["错误: --chat 不能与位置任务同时使用"]
+    assert provider.requests == []
+
+
+def test_cli_chat_preserves_history_and_resets_each_task_budget(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(text="第一轮回答", finish_reason="stop"),
+            ModelResponse(text="第二轮回答", finish_reason="stop"),
+        ]
+    )
+    inputs = iter(["第一项任务", "第二项任务", "/exit"])
+    output: list[str] = []
+
+    exit_code = main(
+        ["--chat", "--workspace", str(tmp_path), "--max-steps", "1"],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert output == [
+        "第一轮回答",
+        "停止原因: completed",
+        "第二轮回答",
+        "停止原因: completed",
+    ]
+    assert provider.requests[0][0][-1].content == "第一项任务"
+    assert [message.role for message in provider.requests[1][0]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert sum(message.role == "system" for message in provider.requests[1][0]) == 1
+
+
+def test_cli_chat_clear_discards_history_without_calling_provider(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(text="旧回答", finish_reason="stop"),
+            ModelResponse(text="新回答", finish_reason="stop"),
+        ]
+    )
+    inputs = iter(["旧任务", "", "/clear", "新任务", "/exit"])
+    output: list[str] = []
+
+    exit_code = main(
+        ["--chat", "--workspace", str(tmp_path)],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert output == [
+        "旧回答",
+        "停止原因: completed",
+        "会话历史已清空",
+        "新回答",
+        "停止原因: completed",
+    ]
+    assert [message.role for message in provider.requests[1][0]] == ["system", "user"]
+    assert provider.requests[1][0][-1].content == "新任务"
+
+
+def test_cli_chat_eof_and_empty_input_do_not_call_provider(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    prompts: list[str] = []
+
+    def end_input(prompt: str) -> str:
+        prompts.append(prompt)
+        raise EOFError
+
+    exit_code = main(
+        ["--chat", "--workspace", str(tmp_path)],
+        provider=provider,
+        input_fn=end_input,
+    )
+
+    assert exit_code == 0
+    assert len(prompts) == 1
+    assert provider.requests == []
+
+
+def test_cli_chat_abnormal_task_stops_session_without_consuming_next_task(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider([ModelResponse(text="截断内容", finish_reason="length")])
+    inputs = iter(["第一个任务", "不应执行的第二个任务"])
+    errors: list[str] = []
+
+    exit_code = main(
+        ["--chat", "--workspace", str(tmp_path)],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 1
+    assert errors == ["停止原因: length"]
+    assert len(provider.requests) == 1
+
+
+def test_cli_chat_keyboard_interrupt_while_waiting_returns_130(tmp_path: Path) -> None:
+    def interrupt(_: str) -> str:
+        raise KeyboardInterrupt
+
+    errors: list[str] = []
+    exit_code = main(
+        ["--chat", "--workspace", str(tmp_path)],
+        provider=FakeProvider([]),
+        input_fn=interrupt,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 130
+    assert errors == ["停止原因: interrupted"]
+
+
 def test_cli_does_not_parse_read_file_json_as_execution_status(tmp_path: Path) -> None:
     file_content = '{"status":"created","path":"never-created.py","exit_code":0}'
     (tmp_path / "note.txt").write_text(file_content, encoding="utf-8")
