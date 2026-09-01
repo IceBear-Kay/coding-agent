@@ -18,11 +18,12 @@ from coding_agent import (
     create_workspace_registry,
     measure_context_bytes,
 )
+from coding_agent import session_store as session_store_module
 from coding_agent.config import ProviderConfig
 from coding_agent.errors import ProviderNetworkError
 from coding_agent.provider import OpenAICompatibleProvider
 from coding_agent.session import SESSION_SAVE_ERROR_STOP_REASON
-from coding_agent.session_store import SessionStore, SessionStoreError
+from coding_agent.session_store import SessionConflictError, SessionStore, SessionStoreError
 
 
 def test_session_preserves_completed_history_and_resets_task_state(tmp_path: Path) -> None:
@@ -542,6 +543,7 @@ def test_persistent_session_resume_does_not_replay_history(tmp_path: Path) -> No
         "chat_1",
     )
     assert first_session.run("create note").stop_reason == "completed"
+    first_session.close()
 
     second_provider = FakeProvider([ModelResponse(text="continued", finish_reason="stop")])
     resumed = AgentSession.resume(
@@ -562,6 +564,23 @@ def test_persistent_session_resume_does_not_replay_history(tmp_path: Path) -> No
     assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "saved"
 
 
+def test_persistent_session_rejects_second_resume_while_first_is_active(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    first = AgentSession.create(
+        AgentLoop(FakeProvider([]), Workspace(tmp_path)),
+        store,
+        "chat_1",
+    )
+
+    with pytest.raises(SessionConflictError, match="already in use"):
+        AgentSession.resume(
+            AgentLoop(FakeProvider([]), Workspace(tmp_path)),
+            store,
+            "chat_1",
+        )
+    first.close()
+
+
 def test_persistent_resume_rebuilds_system_prompt_for_current_run(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions")
     first_provider = FakeProvider([ModelResponse(text="old answer", finish_reason="stop")])
@@ -571,6 +590,7 @@ def test_persistent_resume_rebuilds_system_prompt_for_current_run(tmp_path: Path
         "chat_1",
     )
     assert first.run("first task").stop_reason == "completed"
+    first.close()
 
     second_provider = FakeProvider([ModelResponse(text="new answer", finish_reason="stop")])
     resumed = AgentSession.resume(
@@ -613,6 +633,33 @@ def test_persistent_session_save_failure_keeps_real_result_and_old_archive(
     assert result.answer == "answer"
     assert Message(role="user", content="task with real result") in session.messages
     assert store.load("chat_1", workspace_root=tmp_path) == original
+
+
+def test_persistent_session_archive_io_failure_keeps_answer_and_old_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = AgentSession.create(
+        AgentLoop(
+            FakeProvider([ModelResponse(text="真实答案", finish_reason="stop")]),
+            Workspace(tmp_path),
+        ),
+        store,
+        "chat_1",
+    )
+    original = store.load("chat_1", workspace_root=tmp_path)
+
+    def fail_fsync(_: int) -> None:
+        raise OSError("simulated archive fsync failure")
+
+    monkeypatch.setattr(session_store_module.os, "fsync", fail_fsync)
+    result = session.run("执行并保存")
+
+    assert result.stop_reason == SESSION_SAVE_ERROR_STOP_REASON
+    assert result.answer == "真实答案"
+    assert isinstance(result.error, SessionStoreError)
+    assert store.load("chat_1", workspace_root=tmp_path) == original
+    session.close()
 
 
 def test_persistent_session_store_directory_is_protected_from_file_tools(tmp_path: Path) -> None:

@@ -75,17 +75,17 @@ def build_parser() -> argparse.ArgumentParser:
     session_group.add_argument(
         "--session",
         metavar="ID",
-        help="创建指定 ID 的持久聊天会话；只能与 --chat 一起使用。",
+        help="创建指定 ID 的持久聊天会话；需处于聊天模式（可省略 --chat）。",
     )
     session_group.add_argument(
         "--resume",
         metavar="ID",
-        help="恢复指定 ID 的持久聊天会话；只能与 --chat 一起使用。",
+        help="恢复指定 ID 的持久聊天会话；需处于聊天模式（可省略 --chat）。",
     )
     parser.add_argument(
         "--session-dir",
         metavar="PATH",
-        help="持久会话存档目录（默认：启动目录下 .local/sessions）。",
+        help="持久会话存档目录（默认：启动目录下 .local/sessions）。需与持久会话参数一起使用。",
     )
     parser.add_argument(
         "--workspace",
@@ -334,39 +334,49 @@ def _run_chat(
     new_session: Callable[[], AgentSession] | None = None,
 ) -> int:
     """Read tasks until an explicit exit, EOF, interrupt, or abnormal result."""
-    while True:
-        try:
-            raw_task = input_fn("任务（/clear 清空历史，/exit 退出）: ")
-        except EOFError:
-            return 0
+    try:
+        while True:
+            try:
+                raw_task = input_fn("任务（/clear 清空历史，/exit 退出）: ")
+            except EOFError:
+                return 0
 
-        task = raw_task.strip()
-        if task == "/exit":
-            return 0
-        if task == "/clear":
-            if new_session is None:
-                session.clear()
-                output_fn("会话历史已清空")
-            else:
-                try:
-                    replacement = new_session()
-                except SessionStoreError as exc:
-                    error_fn(f"错误: 无法切换持久会话：{exc}")
-                    continue
-                session = replacement
-                output_fn(
-                    "会话历史已清空，已切换到新持久会话\n"
-                    f"会话 ID: {session.session_id}\n"
-                    f"存档路径: {session.archive_path}"
-                )
-            continue
-        if not task:
-            continue
+            task = raw_task.strip()
+            if task == "/exit":
+                return 0
+            if task == "/clear":
+                if new_session is None:
+                    session.clear()
+                    output_fn("会话历史已清空")
+                else:
+                    try:
+                        replacement = new_session()
+                    except SessionStoreError as exc:
+                        error_fn(f"错误: 无法切换持久会话：{exc}")
+                        continue
+                    try:
+                        session.close()
+                    except SessionStoreError as exc:
+                        with suppress(SessionStoreError):
+                            replacement.close()
+                        error_fn(f"错误: 旧持久会话锁未能释放：{exc}")
+                        continue
+                    session = replacement
+                    output_fn(
+                        "会话历史已清空，已切换到新持久会话\n"
+                        f"会话 ID: {session.session_id}\n"
+                        f"存档路径: {session.archive_path}"
+                    )
+                continue
+            if not task:
+                continue
 
-        result = session.run(task)
-        exit_code = _report_result(result, output_fn, error_fn)
-        if exit_code != 0:
-            return exit_code
+            result = session.run(task)
+            exit_code = _report_result(result, output_fn, error_fn)
+            if exit_code != 0:
+                return exit_code
+    finally:
+        session.close()
 
 
 def main(
@@ -446,6 +456,12 @@ def main(
             command_limits=command_limits,
         )
         selected_provider = provider if provider is not None else _default_provider()
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+        if args.resume is not None:
+            system_prompt += (
+                "恢复会话中的历史工具结果可能已过时；涉及当前文件状态时，"
+                "必须重新读取并核验，不得把历史结果当作当前磁盘快照。"
+            )
         loop = AgentLoop(
             selected_provider,
             workspace,
@@ -454,7 +470,7 @@ def main(
             max_retries=args.max_retries,
             max_context_bytes=args.max_context_bytes,
             context_policy=args.context_policy,
-            system_prompt=DEFAULT_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             event_callback=lambda event: _report_event(
                 event,
                 output_fn,

@@ -8,6 +8,7 @@ from coding_agent.agent import COMPLETED_STOP_REASON, AgentLoop, AgentRunResult
 from coding_agent.models import Message, SessionState
 from coding_agent.session_store import (
     SessionArchive,
+    SessionLease,
     SessionStore,
     SessionStoreError,
 )
@@ -24,12 +25,18 @@ class AgentSession:
         *,
         store: SessionStore | None = None,
         archive: SessionArchive | None = None,
+        lease: SessionLease | None = None,
     ) -> None:
         if (store is None) != (archive is None):
             raise ValueError("store and archive must be provided together")
+        if archive is None and lease is not None:
+            raise ValueError("lease requires a persistent archive")
+        if archive is not None and (lease is None or not lease.held):
+            raise ValueError("persistent session requires an active lease")
         self.loop = loop
         self.store = store
         self._archive = archive
+        self._lease = lease
         if archive is not None:
             if os.path.normcase(archive.workspace_root) != os.path.normcase(
                 str(loop.workspace.root)
@@ -50,13 +57,27 @@ class AgentSession:
     def create(cls, loop: AgentLoop, store: SessionStore, session_id: str) -> "AgentSession":
         """Create an empty persisted session without calling the provider."""
         archive = store.create(session_id, loop.workspace.root)
-        return cls(loop, store=store, archive=archive)
+        lease: SessionLease | None = None
+        try:
+            lease = store.acquire(session_id)
+            return cls(loop, store=store, archive=archive, lease=lease)
+        except Exception:
+            if lease is not None:
+                with suppress(Exception):
+                    lease.release()
+            raise
 
     @classmethod
     def resume(cls, loop: AgentLoop, store: SessionStore, session_id: str) -> "AgentSession":
         """Load completed history without replaying model or tool calls."""
-        archive = store.load(session_id, workspace_root=loop.workspace.root)
-        return cls(loop, store=store, archive=archive)
+        lease = store.acquire(session_id)
+        try:
+            archive = store.load(session_id, workspace_root=loop.workspace.root)
+            return cls(loop, store=store, archive=archive, lease=lease)
+        except Exception:
+            with suppress(Exception):
+                lease.release()
+            raise
 
     @property
     def session_id(self) -> str | None:
@@ -89,7 +110,7 @@ class AgentSession:
                     deep=True,
                 )
                 try:
-                    self._archive = self.store.save(candidate)
+                    self._archive = self.store.save(candidate, lease=self._lease)
                 except SessionStoreError as exc:
                     result.state.stop_reason = SESSION_SAVE_ERROR_STOP_REASON
                     return AgentRunResult(
@@ -102,6 +123,19 @@ class AgentSession:
     def clear(self) -> None:
         """Discard committed messages while retaining the loop configuration."""
         self.state.messages.clear()
+
+    def close(self) -> None:
+        """Release the persistent session lease, preserving the archive on disk."""
+        if self._lease is not None:
+            lease = self._lease
+            self._lease = None
+            lease.release()
+
+    def __enter__(self) -> "AgentSession":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
 
 __all__ = ["AgentSession", "SESSION_SAVE_ERROR_STOP_REASON"]

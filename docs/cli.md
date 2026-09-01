@@ -32,7 +32,7 @@ uv run --env-file .env coding-agent --chat --workspace . --max-steps 8
 
 ## 持久聊天会话
 
-使用 `--session ID` 创建持久会话，使用 `--resume ID` 恢复已有会话；两者互斥，且只能与 `--chat` 一起使用。`--session-dir PATH` 指定 JSON 存档目录，省略时默认为启动目录下的 `.local/sessions`。位置任务不能与持久会话参数同时使用，单独指定 `--session-dir` 会报参数错误。
+使用 `--session ID` 创建持久会话，使用 `--resume ID` 恢复已有会话；两者互斥，且必须处于聊天模式（显式使用 `--chat` 或省略位置任务进入默认聊天）。`--session-dir PATH` 指定 JSON 存档目录，省略时默认为启动目录下的 `.local/sessions`。位置任务不能与持久会话参数同时使用，单独指定 `--session-dir` 会报参数错误。
 
 ```powershell
 uv run --env-file .env coding-agent --chat --session demo-chat --session-dir .local/sessions --workspace .
@@ -43,14 +43,16 @@ uv run --env-file .env coding-agent --chat --resume demo-chat --session-dir .loc
 
 恢复后 CLI 会提示历史工具结果可能过时；继续任务前应重新读取并核验当前文件。
 
+同一会话 ID 在持久会话使用期间由单个进程独占；其他进程会在恢复阶段被拒绝，不会调用模型或工具。正常退出、异常退出和 `Ctrl+C` 会释放本进程持有的锁，来源不明的 `.lock` 文件不会自动删除。
+
 持久模式下输入 `/clear` 会保留旧 JSON 存档，创建新的空会话 ID 并切换；普通聊天的 `/clear` 仍只清空内存历史。存档保存完整消息历史，不保存裁剪后的请求上下文、API Key、环境变量、Provider 配置、审批状态或进程对象。存档目录不允许 Agent 文件工具直接访问，也不支持中断续跑、跨设备同步、数据库和自动迁移。
 
 ## 参数速查
 
 - `task`：一次任务的文本；提供后执行一次，省略时默认进入聊天。
 - `--chat` / `--no-chat`：显式开启或关闭连续任务会话；两者互斥，`--chat` 不能与位置任务同时使用。
-- `--session ID`：创建指定 ID 的持久聊天会话；只能与 `--chat` 一起使用，不能与位置任务同时使用。
-- `--resume ID`：恢复指定 ID 的持久聊天会话；只能与 `--chat` 一起使用，不能与位置任务同时使用。
+- `--session ID`：创建指定 ID 的持久聊天会话；需处于聊天模式（可省略 `--chat`），不能与位置任务同时使用。
+- `--resume ID`：恢复指定 ID 的持久聊天会话；需处于聊天模式（可省略 `--chat`），不能与位置任务同时使用。
 - `--session-dir PATH`：持久会话 JSON 存档目录；默认是启动目录下 `.local/sessions`，必须与 `--session` 或 `--resume` 一起使用。
 - `--workspace` / `-w`：工作区目录，默认是当前目录。
 - `--allow-write` / `--no-write`：默认开放或关闭 `write_file` 和 `edit_file`；每个副作用操作仍需单独审批。

@@ -1,15 +1,18 @@
 import json
+import subprocess
 import sys
 from io import StringIO
 from pathlib import Path
 
 import pytest
 
+from coding_agent import session_store as session_store_module
 from coding_agent.agent import DEFAULT_SYSTEM_PROMPT
 from coding_agent.cli import build_parser, main
 from coding_agent.context import measure_context_bytes
 from coding_agent.models import Message, ModelResponse, ToolCall
 from coding_agent.provider import FakeProvider
+from coding_agent.session_store import SessionStore
 from coding_agent.tools import Workspace, create_read_only_registry
 
 
@@ -176,6 +179,143 @@ def test_cli_persistent_resume_does_not_replay_provider_or_tools(tmp_path: Path)
     assert resumed_provider.requests == []
     assert output[0].startswith("持久会话 ID: chat_1\n存档路径:")
     assert "保存历史" not in output[0]
+
+
+def test_cli_resume_adds_stale_history_rule_to_provider_system_prompt(tmp_path: Path) -> None:
+    store_root = tmp_path / "archives"
+    first_inputs = iter(["保存历史", "/exit"])
+    assert (
+        main(
+            [
+                "--chat",
+                "--session",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+                "--read-only",
+            ],
+            provider=FakeProvider([ModelResponse(text="已保存", finish_reason="stop")]),
+            input_fn=lambda _: next(first_inputs),
+        )
+        == 0
+    )
+
+    provider = FakeProvider([ModelResponse(text="已继续", finish_reason="stop")])
+    inputs = iter(["继续任务", "/exit"])
+    output: list[str] = []
+    assert (
+        main(
+            [
+                "--chat",
+                "--resume",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+                "--read-only",
+            ],
+            provider=provider,
+            input_fn=lambda _: next(inputs),
+            output_fn=output.append,
+        )
+        == 0
+    )
+
+    system = provider.requests[0][0][0]
+    assert system.role == "system"
+    assert system.content is not None
+    assert system.content.count("历史工具结果可能已过时") == 1
+    assert sum(message.role == "system" for message in provider.requests[0][0]) == 1
+
+
+def test_cli_archive_io_failure_reports_save_error_and_keeps_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_root = tmp_path / "archives"
+    calls = 0
+    real_fsync = session_store_module.os.fsync
+
+    def fail_during_save(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls > 3:
+            raise OSError("simulated archive fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(session_store_module.os, "fsync", fail_during_save)
+    output: list[str] = []
+    errors: list[str] = []
+    exit_code = main(
+        [
+            "--chat",
+            "--session",
+            "chat_1",
+            "--session-dir",
+            str(store_root),
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+        ],
+        provider=FakeProvider([ModelResponse(text="真实答案", finish_reason="stop")]),
+        input_fn=lambda _: "完成任务",
+        output_fn=output.append,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 1
+    assert "真实答案" in output
+    assert errors and errors[0].startswith("停止原因: session_save_error")
+    archive = json.loads((store_root / "chat_1.json").read_text(encoding="utf-8"))
+    assert archive["messages"] == []
+
+
+def test_cli_rejects_cross_process_session_occupancy_before_provider_or_tools(
+    tmp_path: Path,
+) -> None:
+    store_root = tmp_path / "archives"
+    SessionStore(store_root).create("chat_1", tmp_path)
+    child_code = (
+        "import sys,time; "
+        "from coding_agent.session_store import SessionStore; "
+        "lease=SessionStore(sys.argv[1]).acquire('chat_1'); "
+        "print('ready', flush=True); time.sleep(30)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", child_code, str(store_root)],
+        cwd=Path(__file__).resolve().parents[1],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        provider = FakeProvider([])
+        errors: list[str] = []
+        exit_code = main(
+            [
+                "--chat",
+                "--resume",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+                "--read-only",
+            ],
+            provider=provider,
+            error_fn=errors.append,
+        )
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+    assert exit_code == 2
+    assert provider.requests == []
+    assert errors == ["错误: session is already in use"]
+    assert not (tmp_path / "unexpected.txt").exists()
 
 
 def test_cli_persistent_clear_keeps_old_archive_and_switches_id(tmp_path: Path) -> None:

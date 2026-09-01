@@ -164,6 +164,37 @@ def test_session_store_rejects_existing_session_lock(tmp_path: Path) -> None:
     assert lock_path.read_text(encoding="utf-8") == "other process"
 
 
+def test_session_lease_holds_until_explicit_release(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    store.create("chat_1", tmp_path)
+
+    lease = store.acquire("chat_1")
+    assert lease.held is True
+    assert store.path_for("chat_1").exists()
+    with pytest.raises(SessionConflictError, match="already in use"):
+        store.acquire("chat_1")
+
+    lease.release()
+    assert lease.held is False
+    replacement = store.acquire("chat_1")
+    replacement.release()
+
+
+def test_session_lease_initialization_failure_cleans_its_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    store.create("chat_1", tmp_path)
+
+    def fail_write(*args, **kwargs):
+        raise OSError("simulated lock write failure")
+
+    monkeypatch.setattr(session_store_module.os, "write", fail_write)
+    with pytest.raises(SessionStoreError, match="initialization failed"):
+        store.acquire("chat_1")
+    assert not (store.root / ".chat_1.lock").exists()
+
+
 def test_session_store_revalidates_mutated_archive_before_save(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions")
     archive = store.create("chat_1", tmp_path, [])

@@ -23,7 +23,7 @@ CLI
 - **ModelProvider**：屏蔽模型厂商差异，输出统一 `ModelResponse`。
 - **Tool Registry/Dispatcher**：暴露工具 Schema、验证参数并调度本地实现。
 - **Context Policy**：按 UTF-8 字节预算检查请求上下文；默认 `stop` 在超限时停止，显式 `trim` 时按完整旧任务从最早开始裁剪，当前不提供摘要压缩。
-- **AgentSession / SessionStore**：在聊天任务正常完成后提交完整历史；可选 JSON 存档支持跨进程恢复，原子写入并校验工作区和历史结构。
+- **AgentSession / SessionStore**：在聊天任务正常完成后提交完整历史；可选 JSON 存档支持跨进程恢复，使用会话生命周期独占锁、原子写入并校验工作区和历史结构。
 
 CLI 通过轻量执行事件显示实际的工具调用和结构化结果摘要，包括文件相对路径、命令
 退出状态、超时或截断信息；它不展示认证信息、完整 API 请求或模型的

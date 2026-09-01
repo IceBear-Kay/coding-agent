@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 from collections.abc import Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -53,6 +53,81 @@ class SessionSizeError(SessionStoreError):
 
 class SessionValidationError(SessionStoreError):
     """Raised when an archive cannot be trusted as a completed session."""
+
+
+class SessionLease:
+    """An exclusive lock held for the lifetime of one persistent session."""
+
+    def __init__(self, store: SessionStore, session_id: str) -> None:
+        self.store = store
+        self.session_id = _validate_session_id(session_id)
+        self.path = store.root / f".{self.session_id}.lock"
+        self._descriptor: int | None = None
+
+    @property
+    def held(self) -> bool:
+        return self._descriptor is not None
+
+    def acquire(self) -> SessionLease:
+        if self.held:
+            return self
+        self.store._check_path(self.path)
+        try:
+            descriptor = os.open(
+                self.path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+            )
+        except FileExistsError as exc:
+            raise SessionConflictError("session is already in use") from exc
+        except OSError as exc:
+            raise SessionStoreError("session lock could not be created") from exc
+
+        self._descriptor = descriptor
+        try:
+            os.write(descriptor, str(os.getpid()).encode("ascii"))
+            os.fsync(descriptor)
+        except OSError as exc:
+            cleanup_error: OSError | None = None
+            try:
+                os.close(descriptor)
+            except OSError as close_exc:
+                cleanup_error = close_exc
+            self._descriptor = None
+            try:
+                self.path.unlink()
+            except OSError as unlink_exc:
+                cleanup_error = unlink_exc
+            if cleanup_error is not None:
+                raise SessionStoreError(
+                    "session lock initialization failed and cleanup failed"
+                ) from exc
+            raise SessionStoreError("session lock initialization failed") from exc
+        return self
+
+    def release(self) -> None:
+        descriptor = self._descriptor
+        if descriptor is None:
+            return
+        self._descriptor = None
+        close_error: OSError | None = None
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            close_error = exc
+        try:
+            self.path.unlink()
+        except OSError as exc:
+            if close_error is None:
+                close_error = exc
+        if close_error is not None:
+            raise SessionStoreError("session lock could not be released") from close_error
+
+    def __enter__(self) -> SessionLease:
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.release()
 
 
 def _validate_session_id(value: str) -> str:
@@ -191,6 +266,10 @@ class SessionStore:
         self._check_path(path)
         return path
 
+    def acquire(self, session_id: str) -> SessionLease:
+        """Acquire an exclusive lease for the lifetime of a persistent session."""
+        return SessionLease(self, session_id).acquire()
+
     def create(
         self,
         session_id: str,
@@ -240,12 +319,18 @@ class SessionStore:
         *,
         expected_revision: int | None = None,
         now: datetime | None = None,
+        lease: SessionLease | None = None,
     ) -> SessionArchive:
         """Atomically update an existing archive after checking its revision."""
         if not isinstance(archive, SessionArchive):
             raise TypeError("archive must be a SessionArchive")
         path = self.path_for(archive.session_id)
-        with self._session_lock(archive.session_id):
+        if lease is not None and (
+            lease.store is not self or lease.session_id != archive.session_id or not lease.held
+        ):
+            raise SessionConflictError("session lease is not held")
+
+        def save_locked() -> SessionArchive:
             current = self.load(archive.session_id)
             expected = archive.revision if expected_revision is None else expected_revision
             if expected != current.revision:
@@ -269,28 +354,20 @@ class SessionStore:
             except (TypeError, ValueError, ValidationError) as exc:
                 raise SessionValidationError("session archive is invalid") from exc
             self._write_archive(path, updated, replace=True)
-        return updated
+            return updated
+
+        if lease is not None:
+            return save_locked()
+        with self._session_lock(archive.session_id):
+            return save_locked()
 
     @contextmanager
     def _session_lock(self, session_id: str):
-        lock_path = self.root / f".{_validate_session_id(session_id)}.lock"
-        self._check_path(lock_path)
+        lease = self.acquire(session_id)
         try:
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError as exc:
-            raise SessionConflictError("session is already in use") from exc
-        except OSError as exc:
-            raise SessionStoreError("session lock could not be created") from exc
-        try:
-            os.write(descriptor, str(os.getpid()).encode("ascii"))
-            os.fsync(descriptor)
             yield
         finally:
-            os.close(descriptor)
-            try:
-                lock_path.unlink()
-            except OSError as exc:
-                raise SessionStoreError("session lock could not be released") from exc
+            lease.release()
 
     def _ensure_root(self) -> None:
         self._check_existing_components(self.root)
@@ -339,6 +416,9 @@ class SessionStore:
             raise SessionConflictError("session already exists")
 
         temporary_path: Path | None = None
+        save_error: SessionStoreError | None = None
+        save_cause: BaseException | None = None
+        cleanup_error: OSError | None = None
         try:
             with tempfile.NamedTemporaryFile(
                 mode="wb",
@@ -355,14 +435,27 @@ class SessionStore:
                 raise SessionConflictError("session already exists")
             os.replace(temporary_path, path)
             temporary_path = None
-        except SessionStoreError:
-            raise
+        except SessionStoreError as exc:
+            save_error = exc
         except OSError as exc:
-            raise SessionStoreError("session archive could not be saved") from exc
+            save_error = SessionStoreError("session archive could not be saved")
+            save_cause = exc
         finally:
             if temporary_path is not None:
-                with suppress(OSError):
+                try:
                     temporary_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    cleanup_error = exc
+        if save_error is not None and cleanup_error is not None:
+            raise SessionStoreError(
+                "session archive could not be saved; temporary cleanup failed"
+            ) from save_error
+        if save_error is not None:
+            if save_cause is not None:
+                raise save_error from save_cause
+            raise save_error
+        if cleanup_error is not None:
+            raise SessionStoreError("session archive temporary cleanup failed") from cleanup_error
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -385,5 +478,6 @@ __all__ = [
     "SessionSizeError",
     "SessionStore",
     "SessionStoreError",
+    "SessionLease",
     "SessionValidationError",
 ]
