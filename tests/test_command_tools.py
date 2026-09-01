@@ -115,6 +115,7 @@ def test_run_command_accepts_argument_and_stdin_byte_boundaries() -> None:
 def test_command_limits_use_bounded_defaults() -> None:
     limits = CommandLimits()
 
+    assert DEFAULT_COMMAND_TIMEOUT_SECONDS == 20.0
     assert limits.timeout_seconds == DEFAULT_COMMAND_TIMEOUT_SECONDS
     assert limits.output_limit_bytes == DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES
 

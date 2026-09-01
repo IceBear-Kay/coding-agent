@@ -121,7 +121,7 @@ uv run --env-file .env coding-agent '读取 notes.md 并用中文总结文件内
 uv run coding-agent '读取 notes.md 并用中文总结文件内容。' --workspace $demo --max-steps 8
 ```
 
-默认只开放 `list_files` 和 `read_file`。模型请求写入或执行工具时，未显式开启对应开关就会收到拒绝；开启后仍必须由你逐次审批。
+CLI 默认开放 `list_files`、`read_file`、`write_file`、`edit_file` 和 `run_command`。写入、修改和执行仍必须由你逐次审批；可用 `--no-write`、`--no-exec` 或 `--read-only` 明确关闭对应工具。
 
 ## 常用操作
 
@@ -140,22 +140,22 @@ uv run --env-file .env coding-agent '创建 greeting.py，输出 Hello。' --wor
 生成 Python 程序并运行验证。文件写入和命令执行是两类独立的逐次审批：
 
 ```powershell
-uv run --env-file .env coding-agent '创建 solution.py，读取两个整数并输出它们的和，然后用输入 7 5 运行验证。' --workspace $demo --allow-write --allow-exec --command-timeout 10 --command-output-limit 65536 --max-steps 8 --max-retries 0
+uv run --env-file .env coding-agent '创建 solution.py，读取两个整数并输出它们的和，然后用输入 7 5 运行验证。' --workspace $demo --allow-write --allow-exec --command-timeout 20 --command-output-limit 65536 --max-steps 8 --max-retries 0
 ```
 
-省略任务参数后，Agent 会在终端读取一次任务；这仍是单次任务：
+省略任务参数后，Agent 默认进入连续聊天；如需只读取一次任务，使用 `--no-chat`：
 
 ```powershell
-uv run --env-file .env coding-agent --workspace $demo
+uv run --env-file .env coding-agent --no-chat --workspace $demo
 ```
 
-需要连续交流时，显式使用 `--chat`，且不要同时提供位置任务：
+也可以显式使用 `--chat` 进入连续聊天，且不要同时提供位置任务：
 
 ```powershell
 uv run --env-file .env coding-agent --chat --workspace $demo --max-steps 8
 ```
 
-每次输入的非空文本都会启动一个新任务，并继承此前正常完成任务的内存历史。输入 `/clear` 清空内存历史，输入 `/exit` 正常退出；空输入继续等待，等待输入时收到 EOF 也会正常退出。
+每次输入的非空文本都会启动一个新任务，并继承此前正常完成任务的内存历史。输入 `/clear` 清空内存历史，输入 `/exit` 正常退出；空输入继续等待，等待输入时收到 EOF 也会正常退出。正常工具调用和结果默认显示，可用 `--hide-tool-events` 隐藏；审批、错误、重要警告、最终回答和停止原因始终显示。
 
 查看当前安装版本的完整参数说明：
 
@@ -171,12 +171,14 @@ uv run coding-agent --help
 
 | 参数 | 默认值 | 作用与限制 |
 | --- | --- | --- |
-| `task` | 省略时交互输入 | 单次任务文本；不能与 `--chat` 同时使用。 |
-| `--chat` | 关闭 | 在同一进程内连续输入任务；仅正常完成的任务会加入会话历史。 |
+| `task` | 省略时进入聊天 | 提供后执行一次任务；不能与 `--chat` 同时使用。 |
+| `--chat` / `--no-chat` | 按是否省略 task 推导 | 显式开启或关闭连续聊天；两者互斥。 |
 | `--workspace`, `-w` | `.` | 工作区目录，必须是已有目录；文件工具只能访问工作区内路径。 |
-| `--allow-write` | 关闭 | 开放 `write_file` 和 `edit_file`；每个操作仍需审批。 |
-| `--allow-exec` | 关闭 | 开放 `run_command`；每个命令仍需审批。 |
-| `--command-timeout` | `10.0` 秒 | 本地命令超时；必须是有限数值，且大于 0、不超过 60 秒。 |
+| `--allow-write` / `--no-write` | 默认开启 | 开放或关闭 `write_file` 和 `edit_file`；每个操作仍需审批。 |
+| `--allow-exec` / `--no-exec` | 默认开启 | 开放或关闭 `run_command`；每个命令仍需审批。 |
+| `--read-only` | 关闭 | 同时关闭写入和执行工具；不能与显式 `--allow-write` 或 `--allow-exec` 同时使用。 |
+| `--show-tool-events` / `--hide-tool-events` | 默认显示 | 控制正常工具过程提示；隐藏时审批、错误和最终回答仍显示。 |
+| `--command-timeout` | `20.0` 秒 | 本地命令超时；必须是有限数值，且大于 0、不超过 60 秒。 |
 | `--command-output-limit` | `65536` 字节 | 本地命令 `stdout` 与 `stderr` 共享上限；范围为 1 至 1048576。 |
 | `--max-steps` | `8` | 每个任务的 Provider 调用次数上限，必须为正整数；临时错误重试也计入。不是工具调用次数上限。 |
 | `--max-retries` | `2` | 每个任务中单次临时 Provider 错误的最大重试次数，必须为非负整数；设为 `0` 关闭自动重试。 |

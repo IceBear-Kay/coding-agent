@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from coding_agent.approval import ApprovalCallback, ApprovalRequest, request_approval
 from coding_agent.tools import JsonValue, ToolOutput, ToolSpec, Workspace
 
-DEFAULT_COMMAND_TIMEOUT_SECONDS = 10.0
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 20.0
 MAX_COMMAND_TIMEOUT_SECONDS = 60.0
 DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES = 65_536
 MAX_COMMAND_OUTPUT_LIMIT_BYTES = 1_048_576

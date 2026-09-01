@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`coding-agent` 默认每次运行处理一个任务；显式使用 `--chat` 后，可以在同一进程内连续输入任务并保留正常完成的会话历史。默认只提供工作区内的 `list_files` 和 `read_file`；显式使用 `--allow-write` 后，模型才可以申请调用 `write_file` 和 `edit_file`，显式使用 `--allow-exec` 后才可以申请调用 `run_command`。
+`coding-agent` 带位置任务时执行一次任务；省略位置任务时默认进入连续聊天。聊天会在同一进程内保留正常完成的会话历史。CLI 默认开放 `list_files`、`read_file`、`write_file`、`edit_file` 和 `run_command`，但写入、修改和执行仍需逐次审批；可用 `--no-write`、`--no-exec` 或 `--read-only` 明确关闭对应工具。
 
 ## 直接运行
 
@@ -10,13 +10,19 @@
 uv run --env-file .env coding-agent "请读取 docs/architecture.md 并总结项目架构" --workspace . --max-steps 8
 ```
 
-也可以省略任务参数，程序会在终端提示输入：
+也可以省略任务参数，程序会默认进入连续聊天：
 
 ```powershell
 uv run --env-file .env coding-agent --workspace .
 ```
 
-上述两种方式都只运行一个任务。连续任务需要显式使用 `--chat`，且不能同时提供位置任务：
+如需省略位置任务但只运行一次，可使用 `--no-chat`：
+
+```powershell
+uv run --env-file .env coding-agent --no-chat --workspace .
+```
+
+也可以显式使用 `--chat`，且不能同时提供位置任务：
 
 ```powershell
 uv run --env-file .env coding-agent --chat --workspace . --max-steps 8
@@ -26,15 +32,17 @@ uv run --env-file .env coding-agent --chat --workspace . --max-steps 8
 
 ## 参数速查
 
-- `task`：一次任务的文本；省略时从终端读取，不能与 `--chat` 同时使用。
-- `--chat`：进入同一进程内的连续任务会话；默认关闭。
+- `task`：一次任务的文本；提供后执行一次，省略时默认进入聊天。
+- `--chat` / `--no-chat`：显式开启或关闭连续任务会话；两者互斥，`--chat` 不能与位置任务同时使用。
 - `--workspace` / `-w`：工作区目录，默认是当前目录。
+- `--allow-write` / `--no-write`：默认开放或关闭 `write_file` 和 `edit_file`；每个副作用操作仍需单独审批。
+- `--allow-exec` / `--no-exec`：默认开放或关闭 `run_command`；每个命令仍需单独审批。
+- `--read-only`：同时关闭写入和执行工具；不能与显式 `--allow-write` 或 `--allow-exec` 同时使用。
+- `--show-tool-events` / `--hide-tool-events`：默认显示或隐藏正常工具调用和结果提示；隐藏时审批、错误、重要警告、最终回答和停止原因仍显示。
 - `--max-steps`：每个任务允许的 Provider 调用次数，默认 8；临时错误重试也计入预算。
 - `--max-retries`：每个任务中单次临时 Provider 错误最多重试次数，默认 2；设为 0 可关闭自动重试。
 - `--max-context-bytes`：每次 Provider 请求前的上下文 UTF-8 字节预算，默认 262144；必须为正整数，超限时不发送请求。
-- `--allow-write`：开放 `write_file` 和 `edit_file`，每个副作用操作仍需单独审批。
-- `--allow-exec`：开放 `run_command`，每个命令仍需单独审批。
-- `--command-timeout`：命令超时上限，默认 10 秒，最大 60 秒。
+- `--command-timeout`：命令超时上限，默认 20 秒，最大 60 秒。
 - `--command-output-limit`：stdout 和 stderr 共享的输出字节上限，默认 65536。
 
 查看当前版本的完整参数说明：
@@ -45,11 +53,13 @@ uv run coding-agent --help
 
 `--help` 只检查 CLI 帮助入口，不创建 Provider，也不验证 `.env` 中的配置。
 
+工具调用和结果的正常过程提示默认显示。使用 `--hide-tool-events` 可隐藏这些提示，但不会影响 Provider 消息、工具执行或历史；审批预览、审批结果、工具错误、重要警告、最终回答和停止原因始终保留。`--show-tool-events` 可显式恢复显示，两者互斥。
+
 `--max-context-bytes` 使用内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数作为统一口径。它是软件级输入预算，不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证。每次实际 Provider 请求前都会检查预算；超限时返回 `context_limit`，不自动裁剪历史、摘要或重试请求。该预算独立于 `--max-steps` 的模型调用次数、`--max-retries` 的临时错误重试次数以及本地命令的 `--command-output-limit`。
 
 ## 经审批的文件修改
 
-需要创建或精确修改 UTF-8 文本文件时，显式增加 `--allow-write`：
+需要创建或精确修改 UTF-8 文本文件时，CLI 默认已开放对应工具，也可以显式增加 `--allow-write`；如需关闭写入，使用 `--no-write` 或 `--read-only`：
 
 ```powershell
 uv run --env-file .env coding-agent "请创建 hello.py，输出 Hello, world!" --workspace . --allow-write --max-steps 8
@@ -74,14 +84,14 @@ uv run --env-file .env coding-agent "请创建 hello.py，输出 Hello, world!" 
 需要运行生成的程序时，同时开放文件修改和本地命令工具：
 
 ```powershell
-uv run --env-file .env coding-agent "请创建 solution.py，读取两个整数并输出它们的和，然后用输入 7 5 运行验证" --workspace . --allow-write --allow-exec --command-timeout 10 --command-output-limit 65536 --max-steps 8
+uv run --env-file .env coding-agent "请创建 solution.py，读取两个整数并输出它们的和，然后用输入 7 5 运行验证" --workspace . --allow-write --allow-exec --command-timeout 20 --command-output-limit 65536 --max-steps 8
 ```
 
 模型调用 `run_command` 时提供结构化 `argv`、工作区内的 `cwd` 和独立 `stdin` 文本。程序不会把参数拼成 Shell 命令，也不会自动解释管道、重定向或 `&` 等字符。`python` 会解析为当前 uv 环境实际使用的 Python 3.12 解释器。审批界面会显示解析后的完整参数、工作目录、stdin、超时和输出上限；只有批准后才启动进程，批准后还会重新核对命令与工作目录。
 
 子进程结束后，工具以 JSON 返回 `stdout`、`stderr`、`exit_code`、`status`、执行耗时和 `truncated`，Agent Loop 再把该工具结果交回模型。`completed` 表示进程以退出码 0 结束，不表示生成的算法已经通过其他测试；非零退出返回 `failed`，超时返回 `timeout`，stdout/stderr 合计超过上限返回 `output_limit`。
 
-- `--command-timeout` 默认 10 秒，可设置为大于 0 且不超过 60 的有限数值。
+- `--command-timeout` 默认 20 秒，可设置为大于 0 且不超过 60 的有限数值。
 - `--command-output-limit` 默认 65536 字节，可设置为 1 至 1048576；stdout 和 stderr 共享该预算，达到上限时从读取阶段停止进程并标记截断。
 - stdin、stdout 和 stderr 与审批终端输入彼此独立；stdin 写完后关闭，空字符串表示立即发送 EOF。
 - 子进程使用最小化环境，不继承 DeepSeek、AWS 等凭据；`cwd` 必须是工作区内不经过符号链接或 reparse point 的已有目录。
