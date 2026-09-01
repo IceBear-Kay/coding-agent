@@ -182,11 +182,12 @@ uv run coding-agent --help
 | `--command-output-limit` | `65536` 字节 | 本地命令 `stdout` 与 `stderr` 共享上限；范围为 1 至 1048576。 |
 | `--max-steps` | `8` | 每个任务的 Provider 调用次数上限，必须为正整数；临时错误重试也计入。不是工具调用次数上限。 |
 | `--max-retries` | `2` | 每个任务中单次临时 Provider 错误的最大重试次数，必须为非负整数；设为 `0` 关闭自动重试。 |
-| `--max-context-bytes` | `262144` | 每次 Provider 请求前的上下文 UTF-8 字节预算，必须为正整数；超限时不发送请求。 |
+| `--max-context-bytes` | `262144` | 每次 Provider 请求前的上下文 UTF-8 字节预算，必须为正整数；超限时按 `--context-policy` 处理。 |
+| `--context-policy` | `stop` | 上下文超预算时的策略；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。 |
 
 `--max-steps` 统计模型请求次数；一次模型响应可以包含多个工具调用，这些调用按模型给出的顺序处理。在 `--chat` 模式中，每个新任务都会重新计算 `--max-steps` 和重试预算。写入和执行工具仍按调用逐次审批。`DEEPSEEK_TIMEOUT_SECONDS` 控制 API 网络请求，与 `--command-timeout` 控制的本地子进程超时无关。
 
-`--max-context-bytes` 是软件级输入预算，按内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数统计。它不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证；预算超限时返回 `context_limit`，不自动裁剪历史、不摘要，也不重试该请求。在 `--chat` 中，正常完成任务的历史会继续计入预算；`/clear` 后只计算新历史。
+`--max-context-bytes` 是软件级输入预算，按内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数统计。它不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证。预算超限时，默认 `--context-policy stop` 返回 `context_limit` 且不发送请求；显式使用 `--context-policy trim` 时，才会按完整旧任务从最早开始裁剪，仍无法满足预算则返回 `context_limit`。两种策略都不会摘要或重试该请求。在 `--chat` 中，正常完成任务的历史会继续计入预算；`/clear` 后只计算新历史。
 
 ## 审批与限制
 
@@ -195,7 +196,7 @@ uv run coding-agent --help
 - 正常结束只表示模型不再请求工具，不等于生成的程序通过了独立测试；命令的退出码 `0` 也不自动证明答案正确。
 - `--chat` 只在当前进程内保存正常完成任务的历史。`max_steps`、Provider 错误和非正常模型停止原因会结束整个会话，不继续使用不完整历史。
 - `/clear` 只清空内存消息，不删除工作区文件，也不改变工具开关和运行参数。
-- 当前没有跨启动会话恢复、会话持久化、自动历史裁剪或上下文压缩。
+- 当前没有跨启动会话恢复、会话持久化或上下文压缩；历史裁剪仅在显式设置 `--context-policy trim` 时按完整旧任务执行，默认策略为 `stop`。
 - 文件工具只处理受工作区约束的 UTF-8 文本，不提供删除文件操作。
 - 本地命令以当前用户权限运行。路径检查、审批、资源预算和进程清理用于降低常见误操作风险，不是操作系统级沙箱，也不能阻止被批准程序主动访问其他资源。
 - 自动测试使用 `FakeProvider` 和模拟 HTTP，不调用真实 DeepSeek API。真实 API 手工验证请先确认费用和审批范围。

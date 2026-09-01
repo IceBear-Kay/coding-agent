@@ -154,6 +154,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_CONTEXT_BYTES,
         help=f"请求前上下文 UTF-8 字节预算（默认：{DEFAULT_MAX_CONTEXT_BYTES}）。",
     )
+    parser.add_argument(
+        "--context-policy",
+        choices=("stop", "trim"),
+        default="stop",
+        help="上下文超预算时的处理策略（默认：stop）。",
+    )
     return parser
 
 
@@ -178,6 +184,17 @@ def _report_result(
 ) -> int:
     if result.answer is not None:
         output_fn(result.answer)
+
+    if result.state.context_trimmed_tasks:
+        if result.stop_reason == "context_limit":
+            context_note = "；裁剪后仍超出字节预算，未发送请求。"
+        else:
+            context_note = "。"
+        output_fn(
+            "上下文提示：已移除 "
+            f"{result.state.context_trimmed_tasks} 个较早的完整任务，仅影响本次请求上下文；"
+            f"完整历史仍保留{context_note}"
+        )
 
     if result.stop_reason == COMPLETED_STOP_REASON:
         output_fn(f"停止原因: {result.stop_reason}")
@@ -391,6 +408,7 @@ def main(
             max_steps=args.max_steps,
             max_retries=args.max_retries,
             max_context_bytes=args.max_context_bytes,
+            context_policy=args.context_policy,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
             event_callback=lambda event: _report_event(
                 event,

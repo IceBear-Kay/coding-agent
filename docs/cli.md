@@ -41,7 +41,8 @@ uv run --env-file .env coding-agent --chat --workspace . --max-steps 8
 - `--show-tool-events` / `--hide-tool-events`：默认显示或隐藏正常工具调用和结果提示；隐藏时审批、错误、重要警告、最终回答和停止原因仍显示。
 - `--max-steps`：每个任务允许的 Provider 调用次数，默认 8；临时错误重试也计入预算。
 - `--max-retries`：每个任务中单次临时 Provider 错误最多重试次数，默认 2；设为 0 可关闭自动重试。
-- `--max-context-bytes`：每次 Provider 请求前的上下文 UTF-8 字节预算，默认 262144；必须为正整数，超限时不发送请求。
+- `--max-context-bytes`：每次 Provider 请求前的上下文 UTF-8 字节预算，默认 262144；必须为正整数，超限时按 `--context-policy` 处理。
+- `--context-policy`：上下文超预算时的策略，默认 `stop`；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。
 - `--command-timeout`：命令超时上限，默认 20 秒，最大 60 秒。
 - `--command-output-limit`：stdout 和 stderr 共享的输出字节上限，默认 65536。
 
@@ -55,7 +56,7 @@ uv run coding-agent --help
 
 工具调用和结果的正常过程提示默认显示。使用 `--hide-tool-events` 可隐藏这些提示，但不会影响 Provider 消息、工具执行或历史；审批预览、审批结果、工具错误、重要警告、最终回答和停止原因始终保留。`--show-tool-events` 可显式恢复显示，两者互斥。
 
-`--max-context-bytes` 使用内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数作为统一口径。它是软件级输入预算，不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证。每次实际 Provider 请求前都会检查预算；超限时返回 `context_limit`，不自动裁剪历史、摘要或重试请求。该预算独立于 `--max-steps` 的模型调用次数、`--max-retries` 的临时错误重试次数以及本地命令的 `--command-output-limit`。
+`--max-context-bytes` 使用内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数作为统一口径。它是软件级输入预算，不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证。每次实际 Provider 请求前都会检查预算；默认 `--context-policy stop` 超限时返回 `context_limit`，不发送请求；显式使用 `--context-policy trim` 时，按完整旧任务从最早开始裁剪，仍无法满足预算则返回 `context_limit`。裁剪不会摘要或重试请求。该预算独立于 `--max-steps` 的模型调用次数、`--max-retries` 的临时错误重试次数以及本地命令的 `--command-output-limit`。
 
 ## 经审批的文件修改
 
@@ -103,11 +104,11 @@ uv run --env-file .env coding-agent "请创建 solution.py，读取两个整数�
 
 `--chat` 使用一份内存中的权威消息历史。每个新任务创建独立的任务状态，因此 Provider 调用次数和临时错误重试预算都会从零开始；模型请求仍能看到此前正常完成任务的 `system`、`user`、`assistant` 和 `tool` 消息，包括原始 `tool_call_id` 与必要的 `reasoning_content`。系统消息不会在每个任务前重复添加。
 
-正常完成任务的历史会继续计入 `--max-context-bytes`；如果累积历史或工具结果使下一次请求超限，任务以 `context_limit` 停止，已完成的工具结果仍保留在本次状态中。`/clear` 清空内存历史后，后续任务只按新的消息和工具 Schema 检查预算。
+正常完成任务的历史会继续计入 `--max-context-bytes`；默认策略下，如果累积历史或工具结果使下一次请求超限，任务以 `context_limit` 停止；使用 `--context-policy trim` 时，会先移除最早的完整任务，仍超限才停止。已完成的工具结果仍保留在本次状态中。`/clear` 清空内存历史后，后续任务只按新的消息和工具 Schema 检查预算。
 
 只有停止原因为 `completed` 的任务会提交到会话历史。`max_steps`、Provider 错误、`length`、`content_filter`、`insufficient_system_resource` 或 `Ctrl+C` 会结束整个会话，不继续读取下一任务，也不会把不完整的工具调用序列用于后续请求。已经完成的工具操作及其真实结果不会回滚或伪造，尚未执行的工具不会继续执行。
 
-`/clear` 清空内存历史，但保留工作区、Provider 配置、工具开关和命令资源限制，不删除任何文件。会话不会写入磁盘，退出进程后不能恢复；当前也不提供自动裁剪、摘要压缩、保存或中断续跑。
+`/clear` 清空内存历史，但保留工作区、Provider 配置、工具开关和命令资源限制，不删除任何文件。会话不会写入磁盘，退出进程后不能恢复；当前不提供摘要压缩、保存或中断续跑，历史裁剪仅由显式的 `--context-policy trim` 控制。
 
 ## Provider 配置
 
