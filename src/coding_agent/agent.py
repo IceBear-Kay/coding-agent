@@ -9,6 +9,7 @@ from typing import Literal
 from coding_agent.context import (
     DEFAULT_MAX_CONTEXT_BYTES,
     ContextBudget,
+    ContextHistoryError,
     ContextLimitError,
     ContextPolicy,
     ContextSerializationError,
@@ -157,9 +158,12 @@ class AgentLoop:
                         max_context_bytes=self.context_budget.max_bytes,
                         policy=self.context_policy,
                     )
-                    state.context_trimmed_tasks += selection.removed_task_count
+                    state.context_trimmed_tasks = max(
+                        state.context_trimmed_tasks,
+                        selection.removed_task_count,
+                    )
                     context_result = self.context_budget.check(selection.messages, tool_schemas)
-                except ContextSerializationError as exc:
+                except (ContextHistoryError, ContextSerializationError) as exc:
                     state.stop_reason = CONTEXT_ERROR_STOP_REASON
                     return AgentRunResult(answer=None, state=state, error=exc)
                 if context_result.exceeded:

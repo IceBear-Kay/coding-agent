@@ -8,6 +8,7 @@ import pytest
 
 from coding_agent import (
     COMPLETED_STOP_REASON,
+    CONTEXT_ERROR_STOP_REASON,
     CONTEXT_LIMIT_STOP_REASON,
     DEFAULT_SYSTEM_PROMPT,
     AgentEvent,
@@ -1180,8 +1181,11 @@ def test_agent_loop_trim_policy_removes_old_tool_exchange_as_one_group(
         )
     )
 
-    assert session.run("旧任务").stop_reason == COMPLETED_STOP_REASON
-    assert session.run("新任务").stop_reason == COMPLETED_STOP_REASON
+    first = session.run("旧任务")
+    second = session.run("新任务")
+
+    assert first.stop_reason == COMPLETED_STOP_REASON
+    assert second.stop_reason == COMPLETED_STOP_REASON
 
     assert len(provider.requests) == 3
     second_request = provider.requests[1][0]
@@ -1189,6 +1193,81 @@ def test_agent_loop_trim_policy_removes_old_tool_exchange_as_one_group(
     third_request = provider.requests[2][0]
     assert [message.role for message in third_request] == ["system", "user"]
     assert all(message.tool_call_id != "call_old" for message in third_request)
+    assert second.state.context_trimmed_tasks == 1
+
+
+def test_agent_loop_trim_count_is_not_repeated_for_retries_or_tool_rounds(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "notes.txt").write_text("notes", encoding="utf-8")
+    workspace = Workspace(tmp_path)
+    registry = create_read_only_registry(workspace)
+    call_notes = ToolCall(
+        id="call_notes",
+        name="read_file",
+        arguments={"path": "notes.txt"},
+    )
+    budget = measure_context_bytes(
+        [
+            Message(role="system", content=DEFAULT_SYSTEM_PROMPT),
+            Message(role="user", content="new"),
+            Message(role="assistant", content=None, tool_calls=[call_notes]),
+            Message(role="tool", content="notes", tool_call_id=call_notes.id),
+        ],
+        registry.schemas(),
+    )
+    provider = ScriptedProvider(
+        [
+            ModelResponse(text="old done", finish_reason="stop"),
+            ProviderNetworkError("temporary"),
+            ModelResponse(
+                tool_calls=[call_notes],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="new done", finish_reason="stop"),
+        ]
+    )
+    session = AgentSession(
+        AgentLoop(
+            provider,
+            workspace,
+            registry=registry,
+            max_context_bytes=budget,
+            context_policy="trim",
+            max_retries=1,
+            system_prompt=DEFAULT_SYSTEM_PROMPT,
+        )
+    )
+
+    assert session.run("old").stop_reason == COMPLETED_STOP_REASON
+    result = session.run("new")
+
+    assert result.stop_reason == COMPLETED_STOP_REASON
+    assert result.state.context_trimmed_tasks == 1
+    assert len(provider.requests) == 4
+
+
+def test_agent_loop_rejects_malformed_history_before_provider_call(tmp_path: Path) -> None:
+    private_task = "private history that must not be echoed"
+    history = [
+        Message(role="user", content=private_task),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                ToolCall(id="call_missing", name="read_file", arguments={"path": "notes.txt"})
+            ],
+        ),
+    ]
+    provider = FakeProvider([])
+
+    result = AgentLoop(provider, Workspace(tmp_path)).run("current task", history=history)
+
+    assert result.stop_reason == CONTEXT_ERROR_STOP_REASON
+    assert result.state.step_count == 0
+    assert result.error is not None
+    assert "private history" not in str(result.error)
+    assert provider.requests == []
 
 
 def test_agent_loop_trim_policy_does_not_remove_current_task_after_tool_result_exceeds_budget(

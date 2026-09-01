@@ -384,9 +384,55 @@ def test_cli_trim_policy_reports_context_diagnostic_without_message_content(
 
     assert exit_code == 0
     diagnostics = [message for message in output if message.startswith("上下文提示：")]
-    assert diagnostics == ["上下文提示：已移除 1 个较早的完整任务以满足字节预算。"]
-    assert "old private task" not in diagnostics[0]
+    assert diagnostics == [
+        "上下文提示：已移除 1 个较早的完整任务，仅影响本次请求上下文；完整历史仍保留。"
+    ]
+    assert "old" not in diagnostics[0]
     assert "first answer" not in diagnostics[0]
+
+
+def test_cli_trim_policy_reports_when_remaining_context_still_exceeds_budget(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace(tmp_path)
+    registry = create_read_only_registry(workspace)
+    budget = measure_context_bytes(
+        [
+            Message(role="system", content=DEFAULT_SYSTEM_PROMPT),
+            Message(role="user", content="x"),
+        ],
+        registry.schemas(),
+    )
+    provider = FakeProvider([ModelResponse(text="old done", finish_reason="stop")])
+    inputs = iter(["x", "current task"])
+    output: list[str] = []
+    errors: list[str] = []
+
+    exit_code = main(
+        [
+            "--chat",
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+            "--max-context-bytes",
+            str(budget),
+            "--context-policy",
+            "trim",
+        ],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        output_fn=output.append,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 1
+    assert len(provider.requests) == 1
+    diagnostics = [message for message in output if message.startswith("上下文提示：")]
+    assert diagnostics == [
+        "上下文提示：已移除 1 个较早的完整任务，仅影响本次请求上下文；"
+        "完整历史仍保留；裁剪后仍超出字节预算，未发送请求。"
+    ]
+    assert errors[0].startswith("停止原因: context_limit")
 
 
 def test_cli_chat_eof_and_empty_input_do_not_call_provider(tmp_path: Path) -> None:

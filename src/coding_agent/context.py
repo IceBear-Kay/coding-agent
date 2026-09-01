@@ -15,6 +15,13 @@ class ContextSerializationError(ValueError):
     """Raised when the internal context cannot be represented as JSON."""
 
 
+class ContextHistoryError(ValueError):
+    """Raised when conversation history cannot be safely used as context."""
+
+    def __init__(self) -> None:
+        super().__init__("context history is invalid")
+
+
 class ContextLimitError(ValueError):
     """Describe a context budget violation without retaining message contents."""
 
@@ -179,21 +186,67 @@ def select_context(
 def _completed_task_ranges(
     messages: Sequence[Message], current_task_start: int
 ) -> list[tuple[int, int]]:
-    """Find complete historical task ranges without splitting tool exchanges."""
+    """Validate history and find complete task ranges without splitting exchanges."""
     ranges: list[tuple[int, int]] = []
     task_start: int | None = None
-    for index, message in enumerate(messages[:current_task_start]):
+    for index, message in enumerate(messages):
         if message.role == "system":
+            if task_start is not None:
+                raise ContextHistoryError
             continue
         if message.role == "user":
             if task_start is not None:
+                _validate_task(messages, task_start, index, require_completion=True)
                 ranges.append((task_start, index))
             task_start = index
+            if index == current_task_start:
+                break
         elif task_start is None:
-            raise ValueError("history contains a message before its user task")
-    if task_start is not None:
-        ranges.append((task_start, current_task_start))
+            raise ContextHistoryError
+    if task_start != current_task_start:
+        raise ContextHistoryError
+    _validate_task(messages, current_task_start, len(messages), require_completion=False)
     return ranges
+
+
+def _validate_task(
+    messages: Sequence[Message],
+    start: int,
+    end: int,
+    *,
+    require_completion: bool,
+) -> None:
+    """Validate one task's assistant/tool protocol without exposing its contents."""
+    pending: dict[str, None] = {}
+    seen_call_ids: set[str] = set()
+    completed = False
+
+    for message in messages[start + 1 : end]:
+        if message.role == "system" or message.role == "user":
+            raise ContextHistoryError
+        if message.role == "assistant":
+            if completed or pending:
+                raise ContextHistoryError
+            if message.tool_calls:
+                call_ids = [tool_call.id for tool_call in message.tool_calls]
+                if len(call_ids) != len(set(call_ids)) or seen_call_ids.intersection(call_ids):
+                    raise ContextHistoryError
+                seen_call_ids.update(call_ids)
+                pending = dict.fromkeys(call_ids)
+            elif message.content:
+                completed = True
+            else:
+                raise ContextHistoryError
+            continue
+        if message.role == "tool":
+            if message.tool_call_id not in pending:
+                raise ContextHistoryError
+            del pending[message.tool_call_id]
+            continue
+        raise ContextHistoryError
+
+    if pending or (require_completion and not completed):
+        raise ContextHistoryError
 
 
 def check_context_budget(
@@ -209,6 +262,7 @@ __all__ = [
     "DEFAULT_MAX_CONTEXT_BYTES",
     "ContextBudget",
     "ContextBudgetResult",
+    "ContextHistoryError",
     "ContextPolicy",
     "ContextSelectionResult",
     "ContextLimitError",

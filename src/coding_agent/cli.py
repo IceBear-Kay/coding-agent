@@ -186,9 +186,14 @@ def _report_result(
         output_fn(result.answer)
 
     if result.state.context_trimmed_tasks:
+        if result.stop_reason == "context_limit":
+            context_note = "；裁剪后仍超出字节预算，未发送请求。"
+        else:
+            context_note = "。"
         output_fn(
             "上下文提示：已移除 "
-            f"{result.state.context_trimmed_tasks} 个较早的完整任务以满足字节预算。"
+            f"{result.state.context_trimmed_tasks} 个较早的完整任务，仅影响本次请求上下文；"
+            f"完整历史仍保留{context_note}"
         )
 
     if result.stop_reason == COMPLETED_STOP_REASON:

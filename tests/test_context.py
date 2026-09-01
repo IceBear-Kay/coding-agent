@@ -6,6 +6,7 @@ import pytest
 from coding_agent.context import (
     DEFAULT_MAX_CONTEXT_BYTES,
     ContextBudget,
+    ContextHistoryError,
     ContextSerializationError,
     check_context_budget,
     measure_context_bytes,
@@ -183,9 +184,8 @@ def test_select_context_trim_removes_oldest_complete_task_as_one_group() -> None
         Message(role="tool", content="old result", tool_call_id="call_old"),
         Message(role="assistant", content="old answer"),
         Message(role="user", content="current task"),
-        Message(role="assistant", content=None, tool_calls=[]),
     ]
-    current_only = [messages[0], messages[5], messages[6]]
+    current_only = [messages[0], messages[5]]
     budget = measure_context_bytes(current_only, [])
     original = copy.deepcopy(messages)
 
@@ -202,7 +202,7 @@ def test_select_context_trim_removes_oldest_complete_task_as_one_group() -> None
     assert result.removed_task_count == 1
     assert result.messages == tuple(current_only)
     assert messages == original
-    assert result.messages[2] is not messages[6]
+    assert result.messages[1] is not messages[5]
 
 
 def test_select_context_trim_removes_multiple_tasks_oldest_first() -> None:
@@ -259,3 +259,85 @@ def test_select_context_rejects_unknown_policy(policy: str) -> None:
             current_task_start=0,
             policy=policy,  # type: ignore[arg-type]
         )
+
+
+def test_select_context_rejects_incomplete_historical_task_before_trimming() -> None:
+    messages = [
+        Message(role="user", content="private old task"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[ToolCall(id="call_old", name="read_file", arguments={"path": "old.txt"})],
+        ),
+        Message(role="user", content="current task"),
+    ]
+
+    with pytest.raises(ContextHistoryError):
+        select_context(messages, [], current_task_start=2, max_context_bytes=1, policy="trim")
+
+
+def test_select_context_rejects_mismatched_tool_result() -> None:
+    messages = [
+        Message(role="user", content="private old task"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[ToolCall(id="call_same", name="read_file", arguments={"path": "old.txt"})],
+        ),
+        Message(role="tool", content="result", tool_call_id="wrong"),
+        Message(role="user", content="current task"),
+    ]
+
+    with pytest.raises(ContextHistoryError):
+        select_context(messages, [], current_task_start=3, policy="trim")
+
+
+def test_select_context_rejects_missing_tool_result() -> None:
+    messages = [
+        Message(role="user", content="private old task"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[ToolCall(id="call_same", name="read_file", arguments={"path": "old.txt"})],
+        ),
+        Message(role="assistant", content="old answer"),
+        Message(role="user", content="current task"),
+    ]
+
+    with pytest.raises(ContextHistoryError):
+        select_context(messages, [], current_task_start=3, policy="trim")
+
+
+def test_select_context_allows_tool_call_id_reuse_across_tasks() -> None:
+    messages = [
+        Message(role="user", content="old task"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[ToolCall(id="call_same", name="read_file", arguments={"path": "old.txt"})],
+        ),
+        Message(role="tool", content="old result", tool_call_id="call_same"),
+        Message(role="assistant", content="old answer"),
+        Message(role="user", content="another old task"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[ToolCall(id="call_same", name="read_file", arguments={"path": "new.txt"})],
+        ),
+        Message(role="tool", content="new result", tool_call_id="call_same"),
+        Message(role="assistant", content="new answer"),
+        Message(role="user", content="current task"),
+    ]
+    current_only = [messages[8]]
+    budget = measure_context_bytes(current_only, [])
+
+    result = select_context(
+        messages,
+        [],
+        current_task_start=8,
+        max_context_bytes=budget,
+        policy="trim",
+    )
+
+    assert result.messages == tuple(current_only)
+    assert result.removed_task_count == 2
