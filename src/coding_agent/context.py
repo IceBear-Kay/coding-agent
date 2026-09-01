@@ -3,11 +3,12 @@
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from coding_agent.models import Message
 
 DEFAULT_MAX_CONTEXT_BYTES = 262_144
+ContextPolicy = Literal["stop", "trim"]
 
 
 class ContextSerializationError(ValueError):
@@ -104,6 +105,97 @@ class ContextBudget:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ContextSelectionResult:
+    """A non-mutating request context selected from complete conversation history."""
+
+    messages: tuple[Message, ...]
+    used_bytes: int
+    max_bytes: int
+    removed_task_count: int = 0
+
+    @property
+    def within_budget(self) -> bool:
+        """Whether the selected request context fits the configured byte budget."""
+        return self.used_bytes <= self.max_bytes
+
+    @property
+    def trimmed(self) -> bool:
+        """Whether one or more completed historical tasks were removed."""
+        return self.removed_task_count > 0
+
+
+def select_context(
+    messages: Sequence[Message],
+    tools: Sequence[Mapping[str, Any]],
+    *,
+    current_task_start: int,
+    max_context_bytes: int = DEFAULT_MAX_CONTEXT_BYTES,
+    policy: ContextPolicy = "stop",
+) -> ContextSelectionResult:
+    """Select a request context while preserving complete task boundaries.
+
+    ``current_task_start`` points to the user message that began the active task.
+    In ``trim`` mode, completed tasks before that message are removed oldest-first
+    until the serialized context fits or no removable task remains. The input
+    messages and nested tool-call arguments are never mutated.
+    """
+    if policy not in {"stop", "trim"}:
+        raise ValueError("context policy must be 'stop' or 'trim'")
+    budget = ContextBudget(max_bytes=max_context_bytes)
+    if isinstance(current_task_start, bool) or not isinstance(current_task_start, int):
+        raise TypeError("current_task_start must be an integer")
+    if current_task_start < 0 or current_task_start >= len(messages):
+        raise ValueError("current_task_start must point to a message")
+    if messages[current_task_start].role != "user":
+        raise ValueError("current_task_start must point to a user message")
+
+    groups = _completed_task_ranges(messages, current_task_start)
+    removed_indices: set[int] = set()
+    selected = list(messages)
+    used_bytes = budget.measure(selected, tools)
+    removed_task_count = 0
+    if policy == "trim" and used_bytes > budget.max_bytes:
+        for start, end in groups:
+            removed_indices.update(
+                index for index in range(start, end) if messages[index].role != "system"
+            )
+            removed_task_count += 1
+            selected = [
+                message for index, message in enumerate(messages) if index not in removed_indices
+            ]
+            used_bytes = budget.measure(selected, tools)
+            if used_bytes <= budget.max_bytes:
+                break
+
+    return ContextSelectionResult(
+        messages=tuple(message.model_copy(deep=True) for message in selected),
+        used_bytes=used_bytes,
+        max_bytes=budget.max_bytes,
+        removed_task_count=removed_task_count,
+    )
+
+
+def _completed_task_ranges(
+    messages: Sequence[Message], current_task_start: int
+) -> list[tuple[int, int]]:
+    """Find complete historical task ranges without splitting tool exchanges."""
+    ranges: list[tuple[int, int]] = []
+    task_start: int | None = None
+    for index, message in enumerate(messages[:current_task_start]):
+        if message.role == "system":
+            continue
+        if message.role == "user":
+            if task_start is not None:
+                ranges.append((task_start, index))
+            task_start = index
+        elif task_start is None:
+            raise ValueError("history contains a message before its user task")
+    if task_start is not None:
+        ranges.append((task_start, current_task_start))
+    return ranges
+
+
 def check_context_budget(
     messages: Sequence[Message],
     tools: Sequence[Mapping[str, Any]],
@@ -117,9 +209,12 @@ __all__ = [
     "DEFAULT_MAX_CONTEXT_BYTES",
     "ContextBudget",
     "ContextBudgetResult",
+    "ContextPolicy",
+    "ContextSelectionResult",
     "ContextLimitError",
     "ContextSerializationError",
     "check_context_budget",
     "measure_context_bytes",
+    "select_context",
     "serialize_context",
 ]

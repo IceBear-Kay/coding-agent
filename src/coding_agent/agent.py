@@ -10,7 +10,9 @@ from coding_agent.context import (
     DEFAULT_MAX_CONTEXT_BYTES,
     ContextBudget,
     ContextLimitError,
+    ContextPolicy,
     ContextSerializationError,
+    select_context,
 )
 from coding_agent.errors import FatalProviderError, ProviderError, TransientProviderError
 from coding_agent.models import AgentState, Message, ModelResponse, ToolCall, ToolResult
@@ -88,6 +90,7 @@ class AgentLoop:
         max_steps: int = DEFAULT_MAX_STEPS,
         max_retries: int = 2,
         max_context_bytes: int = DEFAULT_MAX_CONTEXT_BYTES,
+        context_policy: ContextPolicy = "stop",
         retry_delay_seconds: float = 0.0,
         sleep: Callable[[float], None] = time.sleep,
         system_prompt: str | None = None,
@@ -101,6 +104,8 @@ class AgentLoop:
             raise ValueError("retry_delay_seconds must not be negative")
         if system_prompt is not None and not system_prompt.strip():
             raise ValueError("system_prompt must not be empty")
+        if context_policy not in {"stop", "trim"}:
+            raise ValueError("context policy must be 'stop' or 'trim'")
 
         self.provider = provider
         self.workspace = workspace
@@ -109,6 +114,7 @@ class AgentLoop:
         self.max_steps = max_steps
         self.max_retries = max_retries
         self.context_budget = ContextBudget(max_bytes=max_context_bytes)
+        self.context_policy = context_policy
         self.retry_delay_seconds = retry_delay_seconds
         self.sleep = sleep
         self.system_prompt = system_prompt
@@ -136,6 +142,7 @@ class AgentLoop:
         ):
             state.messages.append(Message(role="system", content=self.system_prompt))
         state.messages.append(Message(role="user", content=task))
+        current_task_start = len(state.messages) - 1
         self.state = state
         tool_schemas = self.registry.schemas()
         retry_count = 0
@@ -143,7 +150,15 @@ class AgentLoop:
         try:
             while state.step_count < state.max_steps:
                 try:
-                    context_result = self.context_budget.check(state.messages, tool_schemas)
+                    selection = select_context(
+                        state.messages,
+                        tool_schemas,
+                        current_task_start=current_task_start,
+                        max_context_bytes=self.context_budget.max_bytes,
+                        policy=self.context_policy,
+                    )
+                    state.context_trimmed_tasks += selection.removed_task_count
+                    context_result = self.context_budget.check(selection.messages, tool_schemas)
                 except ContextSerializationError as exc:
                     state.stop_reason = CONTEXT_ERROR_STOP_REASON
                     return AgentRunResult(answer=None, state=state, error=exc)
@@ -159,7 +174,7 @@ class AgentLoop:
                 # cannot exceed the caller's global invocation budget.
                 state.step_count += 1
                 try:
-                    response = self.provider.complete(state.messages, tool_schemas)
+                    response = self.provider.complete(list(selection.messages), tool_schemas)
                 except TransientProviderError as exc:
                     if retry_count >= self.max_retries or state.step_count >= state.max_steps:
                         state.stop_reason = TRANSIENT_PROVIDER_ERROR_STOP_REASON

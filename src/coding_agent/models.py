@@ -54,6 +54,8 @@ class AgentState(BaseModel):
     max_steps: int = Field(gt=0)
     messages: list[Message] = Field(default_factory=list)
     step_count: int = Field(default=0, ge=0)
+    # Count historical task groups omitted from provider request contexts.
+    context_trimmed_tasks: int = Field(default=0, ge=0)
     stop_reason: str | None = Field(default=None, min_length=1)
 
 

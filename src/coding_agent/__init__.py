@@ -31,9 +31,12 @@ from coding_agent.context import (
     ContextBudget,
     ContextBudgetResult,
     ContextLimitError,
+    ContextPolicy,
+    ContextSelectionResult,
     ContextSerializationError,
     check_context_budget,
     measure_context_bytes,
+    select_context,
     serialize_context,
 )
 from coding_agent.file_tools import (
@@ -103,6 +106,8 @@ __all__ = [
     "ContextBudget",
     "ContextBudgetResult",
     "ContextLimitError",
+    "ContextPolicy",
+    "ContextSelectionResult",
     "ContextSerializationError",
     "EditFileArguments",
     "FATAL_ERROR_STOP_REASON",
@@ -147,5 +152,6 @@ __all__ = [
     "run_command_tool_spec",
     "write_file_tool_spec",
     "measure_context_bytes",
+    "select_context",
     "serialize_context",
 ]
