@@ -141,7 +141,7 @@ class AgentLoop:
         if self.system_prompt is not None and not any(
             message.role == "system" for message in state.messages
         ):
-            state.messages.append(Message(role="system", content=self.system_prompt))
+            state.messages.insert(0, Message(role="system", content=self.system_prompt))
         state.messages.append(Message(role="user", content=task))
         current_task_start = len(state.messages) - 1
         self.state = state

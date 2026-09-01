@@ -1270,6 +1270,122 @@ def test_agent_loop_rejects_malformed_history_before_provider_call(tmp_path: Pat
     assert provider.requests == []
 
 
+@pytest.mark.parametrize("policy", ["stop", "trim"])
+def test_agent_loop_inserts_missing_system_prompt_at_history_prefix(
+    tmp_path: Path, policy: str
+) -> None:
+    history = [
+        Message(role="user", content="first task"),
+        Message(role="assistant", content="first answer"),
+    ]
+    original_history = deepcopy(history)
+    provider = FakeProvider([ModelResponse(text="second answer", finish_reason="stop")])
+    registry = create_read_only_registry(Workspace(tmp_path))
+    system = Message(role="system", content="rules")
+    current = Message(role="user", content="second task")
+    max_context_bytes = (
+        measure_context_bytes([system, current], registry.schemas())
+        if policy == "trim"
+        else 262_144
+    )
+
+    result = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        registry=registry,
+        system_prompt="rules",
+        context_policy=policy,  # type: ignore[arg-type]
+        max_context_bytes=max_context_bytes,
+    ).run("second task", history=history)
+
+    assert result.stop_reason == COMPLETED_STOP_REASON
+    assert history == original_history
+    assert len(provider.requests) == 1
+    request_messages = provider.requests[0][0]
+    assert request_messages[0] == system
+    assert request_messages[-1] == current
+    assert sum(message.role == "system" for message in request_messages) == 1
+    if policy == "trim":
+        assert [message.content for message in request_messages] == ["rules", "second task"]
+        assert result.state.context_trimmed_tasks == 1
+    else:
+        assert request_messages == [system, *history, current]
+        assert result.state.context_trimmed_tasks == 0
+
+
+def test_agent_loop_does_not_duplicate_existing_system_message(tmp_path: Path) -> None:
+    system = Message(role="system", content="existing rules")
+    history = [
+        system,
+        Message(role="user", content="first task"),
+        Message(role="assistant", content="first answer"),
+    ]
+    provider = FakeProvider([ModelResponse(text="second answer", finish_reason="stop")])
+
+    result = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        system_prompt="new rules",
+    ).run("second task", history=history)
+
+    assert result.stop_reason == COMPLETED_STOP_REASON
+    assert provider.requests[0][0] == [
+        system,
+        Message(role="user", content="first task"),
+        Message(role="assistant", content="first answer"),
+        Message(role="user", content="second task"),
+    ]
+    assert sum(message.role == "system" for message in provider.requests[0][0]) == 1
+
+
+def test_agent_loop_handles_empty_history_with_system_prompt(tmp_path: Path) -> None:
+    provider = FakeProvider([ModelResponse(text="answer", finish_reason="stop")])
+
+    result = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        system_prompt="rules",
+    ).run("task", history=[])
+
+    assert result.stop_reason == COMPLETED_STOP_REASON
+    assert provider.requests[0][0] == [
+        Message(role="system", content="rules"),
+        Message(role="user", content="task"),
+    ]
+
+
+@pytest.mark.parametrize("policy", ["stop", "trim"])
+def test_agent_loop_still_rejects_malformed_history_after_system_insertion(
+    tmp_path: Path, policy: str
+) -> None:
+    history = [
+        Message(role="user", content="incomplete task"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_missing",
+                    name="read_file",
+                    arguments={"path": "notes.txt"},
+                )
+            ],
+        ),
+    ]
+    provider = FakeProvider([])
+
+    result = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        system_prompt="rules",
+        context_policy=policy,  # type: ignore[arg-type]
+    ).run("current task", history=history)
+
+    assert result.stop_reason == CONTEXT_ERROR_STOP_REASON
+    assert result.state.step_count == 0
+    assert provider.requests == []
+
+
 def test_agent_loop_trim_policy_does_not_remove_current_task_after_tool_result_exceeds_budget(
     tmp_path: Path,
 ) -> None:
