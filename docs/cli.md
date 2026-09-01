@@ -86,7 +86,7 @@ uv run --env-file .env coding-agent "请读取 report.docx，概括段落和简�
 
 PDF 的 `start_page` 和 `end_page` 从 1 开始且包含结束页，拒绝布尔值，单次最多 20 页；未指定时从第一页开始并受同一页数上限约束。DOCX 不接受页码参数，按正文顺序返回段落和简单表格。源文件最多 5 MiB，DOCX 容器还受条目数和声明解包大小限制，提取文本最多 32000 个字符，解析结果最多 256 KiB；超过上限会带有 `truncated` 与原因标记。
 
-当选定的 PDF 页面没有文字时，结果只描述该页面范围；如果文档还有未读取页面，会明确提示那些页面可能包含文字。返回的 `processed_start_page`、`processed_end_page`、`selected_pages` 和 `page_limit` 原因用于区分实际处理范围与未读取内容。
+当选定的 PDF 页面没有文字时，结果只描述该页面范围；如果文档还有未读取页面，会明确提示那些页面可能包含文字。返回的 `processed_start_page` 和 `processed_end_page` 记录实际循环处理到的首末页，文本上限提前触发时末页会小于计划范围；`selected_pages` 表示计划选择的页数。`no_text` 结果同样会携带 `truncated` 和 `truncation_reasons`，不会把未读取页面当作已确认的空白。
 
 仅支持文本型 PDF 和简单 DOCX，不提供 OCR、图片理解、旧版 `.doc`、`.docm`、宏执行、外部链接获取或复杂版式/公式还原。损坏、加密、无文字层、不支持格式、路径越界和解析超时会返回结构化工具错误。解析进程只接收已校验且有界的文档字节，并使用最小化环境，不继承模型密钥等无关凭据；这仍不是操作系统级沙箱。
 

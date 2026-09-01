@@ -2,7 +2,9 @@ import hashlib
 import io
 import json
 import os
+import struct
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -76,6 +78,16 @@ def _environment_probe_worker(*args: object) -> None:
     connection.close()
 
 
+def _partial_parse_worker(*args: object) -> None:
+    connection = args[-1]
+    assert hasattr(connection, "_send")
+    payload = b'{"text":"partial"}'
+    connection._send(struct.pack("!i", len(payload)))
+    time.sleep(2)
+    with suppress(OSError):
+        connection._send(payload)
+
+
 def test_read_document_extracts_pdf_text_and_page_range(tmp_path: Path) -> None:
     target = tmp_path / "notes.pdf"
     target.write_bytes(_pdf_bytes("first page", "second page"))
@@ -127,6 +139,53 @@ def test_read_document_pdf_range_can_start_in_middle_and_reach_last_page(
     assert "first" not in payload["text"]
 
 
+def test_read_document_pdf_can_read_only_the_last_page(tmp_path: Path) -> None:
+    target = tmp_path / "last-page.pdf"
+    target.write_bytes(_pdf_bytes("first", "last"))
+
+    payload = json.loads(
+        _dispatch(
+            Workspace(tmp_path),
+            ToolCall(
+                id="call_pdf_last",
+                name="read_document",
+                arguments={"path": target.name, "start_page": 2, "end_page": 2},
+            ),
+        ).content
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["processed_start_page"] == 2
+    assert payload["processed_end_page"] == 2
+    assert payload["selected_pages"] == 1
+    assert payload["truncated"] is False
+    assert "last" in payload["text"]
+
+
+def test_read_document_pdf_text_limit_reports_actual_processed_page(tmp_path: Path) -> None:
+    target = tmp_path / "text-limit.pdf"
+    target.write_bytes(_pdf_bytes("x" * (MAX_DOCUMENT_TEXT_CHARS + 100), "second"))
+
+    payload = json.loads(
+        _dispatch(
+            Workspace(tmp_path),
+            ToolCall(
+                id="call_pdf_text_limit",
+                name="read_document",
+                arguments={"path": target.name},
+            ),
+        ).content
+    )
+
+    assert payload["status"] == "completed"
+    assert payload["selected_pages"] == 2
+    assert payload["processed_end_page"] == 1
+    assert payload["processed_pages"] == 1
+    assert payload["truncated"] is True
+    assert payload["truncation_reasons"] == ["text_limit"]
+    assert "second" not in payload["text"]
+
+
 def test_read_document_pdf_default_page_limit_is_explicit(tmp_path: Path) -> None:
     target = tmp_path / "many-pages.pdf"
     target.write_bytes(_pdf_bytes(*(f"page-{index}" for index in range(25))))
@@ -145,6 +204,29 @@ def test_read_document_pdf_default_page_limit_is_explicit(tmp_path: Path) -> Non
     assert payload["truncated"] is True
     assert payload["truncation_reasons"] == ["page_limit"]
     assert "page-24" not in payload["text"]
+
+
+def test_read_document_pdf_no_text_before_unread_page_is_marked_partial(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "text-after-limit.pdf"
+    target.write_bytes(_pdf_bytes(*([""] * MAX_DOCUMENT_PAGES + ["page-21"])))
+
+    payload = json.loads(
+        _dispatch(
+            Workspace(tmp_path),
+            ToolCall(
+                id="call_pdf_no_text_limit", name="read_document", arguments={"path": target.name}
+            ),
+        ).content
+    )
+
+    assert payload["status"] == "no_text"
+    assert payload["processed_end_page"] == MAX_DOCUMENT_PAGES
+    assert payload["selected_pages"] == MAX_DOCUMENT_PAGES
+    assert payload["truncated"] is True
+    assert payload["truncation_reasons"] == ["page_limit"]
+    assert "unread pages may contain text" in payload["message"]
 
 
 def test_read_document_pdf_no_text_message_is_limited_to_selected_pages(
@@ -360,6 +442,19 @@ def test_read_document_parser_timeout_terminates_worker(monkeypatch: pytest.Monk
     with pytest.raises(document_tools._DocumentReadError, match="time limit"):
         document_tools._parse_document("docx", b"", None, None, timeout_seconds=0.1)
 
+    assert not __import__("multiprocessing").active_children()
+
+
+def test_read_document_partial_result_respects_overall_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(document_tools, "_parse_worker", _partial_parse_worker)
+
+    started = time.monotonic()
+    with pytest.raises(document_tools._DocumentReadError, match="time limit"):
+        document_tools._parse_document("docx", b"", None, None, timeout_seconds=0.2)
+
+    assert time.monotonic() - started < 1.5
     assert not __import__("multiprocessing").active_children()
 
 

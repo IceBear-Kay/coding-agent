@@ -6,6 +6,7 @@ import json
 import multiprocessing
 import os
 import stat
+import threading
 import time
 import zipfile
 from dataclasses import dataclass
@@ -306,7 +307,9 @@ def _extract_pdf(data: bytes, start_page: int, end_page: int | None) -> dict[str
     text_chars = 0
     text_truncated = False
     selected_text_pages = 0
+    processed_end = start_page - 1
     for number in range(start_page, actual_end + 1):
+        processed_end = number
         text = reader.pages[number - 1].extract_text() or ""
         if text:
             selected_text_pages += 1
@@ -318,11 +321,12 @@ def _extract_pdf(data: bytes, start_page: int, end_page: int | None) -> dict[str
         "text_truncated": text_truncated,
         "total_pages": total_pages,
         "selected_pages": actual_end - start_page + 1,
+        "processed_pages": max(0, processed_end - start_page + 1),
         "selected_text_pages": selected_text_pages,
         "requested_start_page": start_page,
         "requested_end_page": requested_end,
         "processed_start_page": start_page,
-        "processed_end_page": actual_end,
+        "processed_end_page": processed_end,
         "page_truncated": requested_end < total_pages,
     }
 
@@ -465,6 +469,41 @@ def _terminate_parse_process(process: multiprocessing.Process) -> bool:
     return not process.is_alive()
 
 
+def _receive_result_with_deadline(
+    connection: Connection,
+    deadline: float,
+) -> tuple[bytes | None, BaseException | None, bool]:
+    """Receive one framed result without allowing a partial frame to block forever."""
+    outcome: dict[str, bytes | BaseException] = {}
+    completed = threading.Event()
+
+    def receive() -> None:
+        try:
+            outcome["payload"] = connection.recv_bytes(MAX_DOCUMENT_RESULT_BYTES)
+        except BaseException as exc:  # The main thread maps the receive failure.
+            outcome["error"] = exc
+        finally:
+            completed.set()
+
+    receiver = threading.Thread(target=receive, name="document-result-receiver", daemon=True)
+    receiver.start()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            connection.close()
+            receiver.join(0.5)
+            return None, None, True
+        if completed.wait(min(0.05, remaining)):
+            receiver.join(0.1)
+            payload = outcome.get("payload")
+            error = outcome.get("error")
+            return (
+                payload if isinstance(payload, bytes) else None,
+                error if isinstance(error, BaseException) else None,
+                False,
+            )
+
+
 def _parse_document(
     format_name: str,
     data: bytes,
@@ -484,45 +523,44 @@ def _parse_document(
         started = True
         send_connection.close()
         deadline = time.monotonic() + timeout_seconds
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+        payload, receive_error, timed_out = _receive_result_with_deadline(
+            receive_connection,
+            deadline,
+        )
+        if timed_out:
+            terminated = _terminate_parse_process(process)
+            if not terminated:
+                raise _DocumentReadError(
+                    "parse_error", "Document parser could not be terminated safely"
+                )
+            raise _DocumentReadError("parse_timeout", "Document parsing exceeded the time limit")
+        if receive_error is not None:
+            if isinstance(receive_error, EOFError):
+                raise _DocumentReadError(
+                    "parse_error", "Document parser returned no result"
+                ) from receive_error
+            if isinstance(receive_error, OSError):
                 terminated = _terminate_parse_process(process)
                 if not terminated:
                     raise _DocumentReadError(
                         "parse_error", "Document parser could not be terminated safely"
-                    )
+                    ) from receive_error
                 raise _DocumentReadError(
-                    "parse_timeout", "Document parsing exceeded the time limit"
-                )
-            if receive_connection.poll(min(0.1, remaining)):
-                try:
-                    payload = receive_connection.recv_bytes(MAX_DOCUMENT_RESULT_BYTES)
-                except EOFError as exc:
-                    _terminate_parse_process(process)
-                    raise _DocumentReadError(
-                        "parse_error", "Document parser returned no result"
-                    ) from exc
-                except OSError as exc:
-                    terminated = _terminate_parse_process(process)
-                    if not terminated:
-                        raise _DocumentReadError(
-                            "parse_error", "Document parser could not be terminated safely"
-                        ) from exc
-                    raise _DocumentReadError(
-                        "resource_limit", "Document parser result exceeded the size limit"
-                    ) from exc
-                try:
-                    result = json.loads(payload)
-                except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
-                    raise _DocumentReadError(
-                        "parse_error", "Document parser returned invalid data"
-                    ) from exc
-                if not isinstance(result, dict):
-                    raise _DocumentReadError("parse_error", "Document parser returned invalid data")
-                break
-            if not process.is_alive():
-                raise _DocumentReadError("parse_error", "Document parser returned no result")
+                    "resource_limit", "Document parser result exceeded the size limit"
+                ) from receive_error
+            raise _DocumentReadError(
+                "parse_error", "Document parser returned invalid data"
+            ) from receive_error
+        if payload is None:
+            raise _DocumentReadError("parse_error", "Document parser returned no result")
+        try:
+            result = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+            raise _DocumentReadError(
+                "parse_error", "Document parser returned invalid data"
+            ) from exc
+        if not isinstance(result, dict):
+            raise _DocumentReadError("parse_error", "Document parser returned invalid data")
         remaining = max(0.0, deadline - time.monotonic())
         process.join(min(1.0, remaining))
         if process.is_alive() and not _terminate_parse_process(process):
@@ -583,6 +621,12 @@ class _ReadDocumentHandler:
             )
             parser_text_truncated = bool(parsed.pop("text_truncated", False))
             text, text_truncated = _truncate_text(parsed.pop("text", ""))
+            page_truncated = bool(parsed.pop("page_truncated", False))
+            truncation_reasons: list[str] = []
+            if page_truncated:
+                truncation_reasons.append("page_limit")
+            if parser_text_truncated or text_truncated:
+                truncation_reasons.append("text_limit")
             if not text:
                 if format_name == "pdf":
                     message = (
@@ -598,25 +642,22 @@ class _ReadDocumentHandler:
                     "path": arguments.path,
                     "format": format_name,
                     "text": "",
-                    "truncated": False,
+                    "truncated": bool(truncation_reasons),
                     "message": message,
                     **parsed,
                 }
+                if truncation_reasons:
+                    details["truncation_reasons"] = truncation_reasons
                 return ToolOutput(status="no_text", details=details, is_error=True)
-            reasons: list[str] = []
-            if parsed.pop("page_truncated", False):
-                reasons.append("page_limit")
-            if parser_text_truncated or text_truncated:
-                reasons.append("text_limit")
             details: dict[str, Any] = {
                 "path": arguments.path,
                 "format": format_name,
                 "text": text,
-                "truncated": bool(reasons),
+                "truncated": bool(truncation_reasons),
                 **parsed,
             }
-            if reasons:
-                details["truncation_reasons"] = reasons
+            if truncation_reasons:
+                details["truncation_reasons"] = truncation_reasons
             return ToolOutput(status="completed", details=details)
         except WorkspacePathError as exc:
             return self._error("invalid_path", arguments.path, str(exc))
