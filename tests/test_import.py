@@ -10,6 +10,7 @@ def test_package_exports_core_public_types() -> None:
         DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES,
         DEFAULT_COMMAND_TIMEOUT_SECONDS,
         DEFAULT_MAX_FILE_BYTES,
+        MAX_DOCUMENT_RESULT_BYTES,
         AgentState,
         ApprovalCallback,
         ApprovalRequest,
@@ -22,6 +23,7 @@ def test_package_exports_core_public_types() -> None:
         ModelResponse,
         OpenAICompatibleProvider,
         ProviderConfig,
+        ReadDocumentArguments,
         RunCommandArguments,
         ToolCall,
         ToolOutput,
@@ -42,12 +44,14 @@ def test_package_exports_core_public_types() -> None:
     assert coding_agent.DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES is DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES
     assert coding_agent.DEFAULT_COMMAND_TIMEOUT_SECONDS is DEFAULT_COMMAND_TIMEOUT_SECONDS
     assert coding_agent.DEFAULT_MAX_FILE_BYTES is DEFAULT_MAX_FILE_BYTES
+    assert coding_agent.MAX_DOCUMENT_RESULT_BYTES is MAX_DOCUMENT_RESULT_BYTES
     assert coding_agent.EditFileArguments is EditFileArguments
     assert coding_agent.FakeProvider is FakeProvider
     assert coding_agent.Message is Message
     assert coding_agent.LocalCommandRunner is LocalCommandRunner
     assert coding_agent.ModelProvider is ModelProvider
     assert coding_agent.ModelResponse is ModelResponse
+    assert coding_agent.ReadDocumentArguments is ReadDocumentArguments
     assert coding_agent.OpenAICompatibleProvider is OpenAICompatibleProvider
     assert coding_agent.ProviderConfig is ProviderConfig
     assert coding_agent.RunCommandArguments is RunCommandArguments

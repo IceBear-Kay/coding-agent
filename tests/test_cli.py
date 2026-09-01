@@ -1269,10 +1269,13 @@ def test_cli_handles_keyboard_interrupt_during_output(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("flags", "expected_names"),
     [
-        ((), ["list_files", "read_file", "write_file", "edit_file", "run_command"]),
-        (("--no-write",), ["list_files", "read_file", "run_command"]),
-        (("--no-exec",), ["list_files", "read_file", "write_file", "edit_file"]),
-        (("--read-only",), ["list_files", "read_file"]),
+        (
+            (),
+            ["list_files", "read_file", "read_document", "write_file", "edit_file", "run_command"],
+        ),
+        (("--no-write",), ["list_files", "read_file", "read_document", "run_command"]),
+        (("--no-exec",), ["list_files", "read_file", "read_document", "write_file", "edit_file"]),
+        (("--read-only",), ["list_files", "read_file", "read_document"]),
     ],
 )
 def test_cli_permission_switches_control_exposed_tool_schemas(
@@ -1328,6 +1331,7 @@ def test_cli_read_only_tools_reject_model_requested_write(tmp_path: Path) -> Non
     assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
         "list_files",
         "read_file",
+        "read_document",
     ]
     tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
     assert tool_message.tool_call_id == "call_write"
@@ -1377,6 +1381,7 @@ def test_cli_executes_approved_command_with_configured_limits(tmp_path: Path) ->
     assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
         "list_files",
         "read_file",
+        "read_document",
         "run_command",
     ]
     tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
@@ -1416,6 +1421,7 @@ def test_cli_does_not_expose_run_command_without_allow_exec(tmp_path: Path) -> N
     assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
         "list_files",
         "read_file",
+        "read_document",
     ]
     tool_message = next(message for message in provider.requests[1][0] if message.role == "tool")
     assert "Unknown tool" in tool_message.content
@@ -1518,6 +1524,7 @@ def test_cli_defaults_to_enabled_tools_but_still_requires_approval(tmp_path: Pat
     assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
         "list_files",
         "read_file",
+        "read_document",
         "write_file",
         "edit_file",
         "run_command",
@@ -1579,6 +1586,7 @@ def test_cli_approves_write_and_edit_as_separate_operations(tmp_path: Path) -> N
     assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
         "list_files",
         "read_file",
+        "read_document",
         "write_file",
         "edit_file",
     ]

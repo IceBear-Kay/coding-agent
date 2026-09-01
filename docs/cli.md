@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`coding-agent` 带位置任务时执行一次任务；省略位置任务时默认进入连续聊天。聊天会在同一进程内保留正常完成的会话历史。CLI 默认开放 `list_files`、`read_file`、`write_file`、`edit_file` 和 `run_command`，但写入、修改和执行仍需逐次审批；可用 `--no-write`、`--no-exec` 或 `--read-only` 明确关闭对应工具。
+`coding-agent` 带位置任务时执行一次任务；省略位置任务时默认进入连续聊天。聊天会在同一进程内保留正常完成的会话历史。CLI 默认开放 `list_files`、`read_file`、`read_document`、`write_file`、`edit_file` 和 `run_command`，但写入、修改和执行仍需逐次审批；可用 `--no-write`、`--no-exec` 或 `--read-only` 明确关闭对应工具。
 
 ## 直接运行
 
@@ -74,6 +74,21 @@ uv run coding-agent --help
 ```
 
 `--help` 只检查 CLI 帮助入口，不创建 Provider，也不验证 `.env` 中的配置。
+
+## 文档读取
+
+`read_document` 是始终可用的只读工具，不需要 `--allow-write` 或 `--allow-exec`。模型可以请求工作区内的 PDF 或 DOCX，工具在本地提取文字后把结构化结果交回 Agent；原文件不会被修改。
+
+```powershell
+uv run --env-file .env coding-agent "请读取 handbook.pdf 的第 1 到 3 页并总结要点" --workspace . --max-steps 8
+uv run --env-file .env coding-agent "请读取 report.docx，概括段落和简单表格" --workspace . --max-steps 8
+```
+
+PDF 的 `start_page` 和 `end_page` 从 1 开始且包含结束页，拒绝布尔值，单次最多 20 页；未指定时从第一页开始并受同一页数上限约束。DOCX 不接受页码参数，按正文顺序返回段落和简单表格。源文件最多 5 MiB，DOCX 容器还受条目数和声明解包大小限制，提取文本最多 32000 个字符，解析结果最多 256 KiB；超过上限会带有 `truncated` 与原因标记。
+
+当选定的 PDF 页面没有文字时，结果只描述该页面范围；如果文档还有未读取页面，会明确提示那些页面可能包含文字。返回的 `processed_start_page` 和 `processed_end_page` 记录实际循环处理到的首末页，文本上限提前触发时末页会小于计划范围；`selected_pages` 表示计划选择的页数。`no_text` 结果同样会携带 `truncated` 和 `truncation_reasons`，不会把未读取页面当作已确认的空白。
+
+仅支持文本型 PDF 和简单 DOCX，不提供 OCR、图片理解、旧版 `.doc`、`.docm`、宏执行、外部链接获取或复杂版式/公式还原。损坏、加密、无文字层、不支持格式、路径越界和解析超时会返回结构化工具错误。解析进程只接收已校验且有界的文档字节，并使用最小化环境，不继承模型密钥等无关凭据；这仍不是操作系统级沙箱。
 
 工具调用和结果的正常过程提示默认显示。使用 `--hide-tool-events` 可隐藏这些提示，但不会影响 Provider 消息、工具执行或历史；审批预览、审批结果、工具错误、重要警告、最终回答和停止原因始终保留。`--show-tool-events` 可显式恢复显示，两者互斥。
 

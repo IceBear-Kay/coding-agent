@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 import pytest
+from docx import Document
 
 from coding_agent import (
     COMPLETED_STOP_REASON,
@@ -114,6 +115,38 @@ def test_agent_loop_runs_tool_then_returns_final_answer(tmp_path: Path) -> None:
     ]
     assert provider.requests[1][0] == result.state.messages[:3]
     assert provider.requests[0][0] == result.state.messages[:1]
+
+
+def test_agent_loop_reads_document_into_tool_history(tmp_path: Path) -> None:
+    document = Document()
+    document.add_paragraph("Document heading")
+    document.save(tmp_path / "notes.docx")
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_document",
+                        name="read_document",
+                        arguments={"path": "notes.docx"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="文档标题是 Document heading。", finish_reason="stop"),
+        ]
+    )
+
+    result = AgentLoop(provider, Workspace(tmp_path)).run("读取 notes.docx 并告诉我标题。")
+
+    assert result.answer == "文档标题是 Document heading。"
+    assert result.stop_reason == COMPLETED_STOP_REASON
+    tool_message = next(message for message in result.state.messages if message.role == "tool")
+    payload = json.loads(tool_message.content)
+    assert tool_message.tool_call_id == "call_document"
+    assert payload["status"] == "completed"
+    assert payload["text"] == "Document heading"
+    assert provider.requests[1][0][-1].tool_call_id == "call_document"
 
 
 def test_agent_loop_emits_real_tool_events_in_dispatch_order(tmp_path: Path) -> None:
@@ -702,6 +735,7 @@ def test_openai_provider_round_trips_side_effect_tools_and_actual_outputs(
     assert schema_names == {
         "list_files",
         "read_file",
+        "read_document",
         "write_file",
         "edit_file",
         "run_command",

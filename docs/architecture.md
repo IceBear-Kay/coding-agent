@@ -14,6 +14,7 @@ CLI
        -> ModelProvider
        -> Tool Registry / Dispatcher
             -> Workspace Files
+            -> Document Parser (PDF/DOCX)
             -> Local Commands
 ```
 
@@ -22,6 +23,7 @@ CLI
 - **AgentState**：保存消息、步骤、工作区、停止原因和上下文裁剪统计；每次任务还记录独立的运行统计。
 - **ModelProvider**：屏蔽模型厂商差异，输出统一 `ModelResponse`。
 - **Tool Registry/Dispatcher**：暴露工具 Schema、验证参数并调度本地实现。
+- **Document Parser**：在工作区边界内有界读取文本型 PDF 和简单 DOCX；打开文件前后复核文件描述符与父目录身份，解析在可终止的受控进程中进行，结果以有界结构化只读工具消息返回。
 - **Context Policy**：按 UTF-8 字节预算检查请求上下文；默认 `stop` 在超限时停止，显式 `trim` 时按完整旧任务从最早开始裁剪，当前不提供摘要压缩。
 - **AgentSession / SessionStore**：在聊天任务正常完成后提交完整历史；可选 JSON 存档支持跨进程恢复，使用会话生命周期独占锁、原子写入并校验工作区和历史结构。
 
@@ -65,6 +67,7 @@ Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数�
 - M2：DeepSeek Provider、只读工具、Agent Loop 和 CLI。
 - M3：经审批的写文件、精确编辑、本地命令执行和端到端编程任务。
 - M5-B：完成聊天会话持久化与恢复、存档边界保护和会话级测试。
+- M5-D：增加有界、只读的 PDF/DOCX 文本提取，并保留现有工具协议、路径保护和上下文预算。
 - 后续：上下文压缩和更强的执行隔离。
 
 只读 M2 用于尽早验证完整数据流，但最终 Coding Agent 必须具备本地写入、修改和命令执行能力。
@@ -72,7 +75,9 @@ Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数�
 ## v0.1.0 当前能力与限制
 
 - CLI 可以接收一次任务和工作区；省略位置任务时默认进入聊天，带位置任务时执行一次。写入、修改和本地命令工具默认开放，但每次副作用操作都需要逐次审批；可用 `--no-write`、`--no-exec` 或 `--read-only` 关闭对应入口。
-- 只读工具为 `list_files` 和 `read_file`；目录扫描和文件输出均有预算。
+- 只读工具为 `list_files`、`read_file` 和 `read_document`；目录扫描、文件输出和文档解析均有预算。
+- `read_document` 使用 `pypdf` 提取 PDF 页面文字，使用 `python-docx` 按正文顺序提取 DOCX 段落和简单表格。源文件最多 5 MiB，PDF 单次最多 20 页，文本最多 32000 个字符，解析结果最多 256 KiB；损坏、加密、选定范围无文字、路径替换、不支持格式、路径越界和资源超限会返回结构化错误，工具不会修改原文档。
+- 文档解析不提供 OCR、图片理解、旧版 `.doc`、`.docm`、宏执行或复杂版式/公式还原；受控解析进程和资源限制不构成操作系统级沙箱。
 - `write_file` 只排他创建新 UTF-8 文件，`edit_file` 只执行一次精确文本替换。两者每次调用都展示完整预览并等待用户确认，批准后还会复核目标状态。
 - `run_command` 接收结构化 argv、工作区内 cwd 和独立 stdin，以 `shell=False` 启动进程；stdout/stderr 共享有界读取预算，并返回退出码、耗时、截断和执行状态。超时、输出超限和中断会触发普通进程树清理。
 - CLI 的 `run_command` 默认超时为 20 秒，可用参数覆盖；正常工具调用和结果摘要默认显示，也可单独隐藏而不改变内部事件或消息历史。

@@ -962,7 +962,7 @@ def test_run_command_is_not_registered_in_existing_workspace_registry(tmp_path: 
 
     names = [spec.name for spec in create_workspace_registry(Workspace(tmp_path), allow_write=True)]
 
-    assert names == ["list_files", "read_file", "write_file", "edit_file"]
+    assert names == ["list_files", "read_file", "read_document", "write_file", "edit_file"]
 
 
 def test_workspace_registry_only_exposes_run_command_when_enabled(tmp_path: Path) -> None:
@@ -976,6 +976,13 @@ def test_workspace_registry_only_exposes_run_command_when_enabled(tmp_path: Path
         for spec in create_workspace_registry(workspace, allow_write=True, allow_exec=True)
     ]
 
-    assert default_names == ["list_files", "read_file"]
-    assert executable_names == ["list_files", "read_file", "run_command"]
-    assert all_names == ["list_files", "read_file", "write_file", "edit_file", "run_command"]
+    assert default_names == ["list_files", "read_file", "read_document"]
+    assert executable_names == ["list_files", "read_file", "read_document", "run_command"]
+    assert all_names == [
+        "list_files",
+        "read_file",
+        "read_document",
+        "write_file",
+        "edit_file",
+        "run_command",
+    ]

@@ -523,8 +523,11 @@ class ToolRegistry:
 
 def read_only_tool_specs(
     workspace: Workspace,
-) -> tuple[ToolSpec[ListFilesArguments], ToolSpec[ReadFileArguments]]:
+) -> tuple[ToolSpec[Any], ...]:
     """Build the standard read-only workspace tool specifications."""
+    # Import lazily to keep the document parser independent from this registry module.
+    from coding_agent.document_tools import read_document_tool_spec
+
     return (
         ToolSpec(
             name="list_files",
@@ -538,11 +541,12 @@ def read_only_tool_specs(
             parameters=ReadFileArguments,
             handler=lambda arguments: workspace.read_file(arguments.path),
         ),
+        read_document_tool_spec(workspace),
     )
 
 
 def create_read_only_registry(workspace: Workspace) -> ToolRegistry:
-    """Create a registry containing list_files and read_file."""
+    """Create a registry containing the standard read-only workspace tools."""
     return ToolRegistry(list(read_only_tool_specs(workspace)))
 
 

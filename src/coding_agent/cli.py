@@ -33,7 +33,7 @@ from coding_agent.session import AgentSession
 from coding_agent.session_store import SessionStore, SessionStoreError
 from coding_agent.tools import Workspace
 
-_STRUCTURED_RESULT_TOOLS = frozenset({"write_file", "edit_file", "run_command"})
+_STRUCTURED_RESULT_TOOLS = frozenset({"write_file", "edit_file", "run_command", "read_document"})
 
 
 def _positive_int(value: str) -> int:
