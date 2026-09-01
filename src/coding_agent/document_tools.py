@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import os
-import queue
+import stat
 import time
 import zipfile
+from dataclasses import dataclass
 from io import BytesIO
-from multiprocessing.queues import Queue
+from multiprocessing.connection import Connection
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
 from coding_agent.tools import ToolOutput, ToolSpec, Workspace, WorkspacePathError
 
@@ -20,10 +22,30 @@ MAX_DOCUMENT_SOURCE_BYTES = 5 * 1024 * 1024
 MAX_DOCUMENT_TEXT_CHARS = 32_000
 MAX_DOCUMENT_PAGES = 20
 MAX_DOCUMENT_PARSE_SECONDS = 10.0
+MAX_DOCUMENT_RESULT_BYTES = 256 * 1024
 MAX_DOCX_ENTRIES = 10_000
 MAX_DOCX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
 MAX_DOCX_ENTRY_BYTES = 16 * 1024 * 1024
 DOCUMENT_TRUNCATION_MARKER = "\n...[document text truncated]"
+
+
+@dataclass(frozen=True, slots=True)
+class _DocumentPathFingerprint:
+    """Identity and metadata captured for one path during a document read."""
+
+    path: Path
+    device: int
+    inode: int
+    mode: int
+    modified_ns: int
+    changed_ns: int
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DocumentPathState:
+    target: _DocumentPathFingerprint
+    parents: tuple[_DocumentPathFingerprint, ...]
 
 
 class ReadDocumentArguments(BaseModel):
@@ -32,8 +54,8 @@ class ReadDocumentArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     path: str = Field(min_length=1)
-    start_page: int | None = Field(default=None, ge=1)
-    end_page: int | None = Field(default=None, ge=1)
+    start_page: StrictInt | None = Field(default=None, ge=1)
+    end_page: StrictInt | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_page_range(self) -> ReadDocumentArguments:
@@ -86,6 +108,85 @@ def _resolve_document_path(workspace: Workspace, requested: str) -> Path:
     return target
 
 
+def _fingerprint(path: Path, *, expect_directory: bool) -> _DocumentPathFingerprint:
+    try:
+        path_stat = os.lstat(path)
+    except OSError as exc:
+        raise WorkspacePathError("Document path changed while it was being inspected") from exc
+    if _is_reparse_point(path):
+        raise WorkspacePathError("Document path crosses a symbolic link or reparse point")
+    if expect_directory and not stat.S_ISDIR(path_stat.st_mode):
+        raise WorkspacePathError("Document parent is no longer a directory")
+    if not expect_directory and not stat.S_ISREG(path_stat.st_mode):
+        raise WorkspacePathError("Document path is not a regular file")
+    return _DocumentPathFingerprint(
+        path=path,
+        device=path_stat.st_dev,
+        inode=path_stat.st_ino,
+        mode=path_stat.st_mode,
+        modified_ns=path_stat.st_mtime_ns,
+        changed_ns=path_stat.st_ctime_ns,
+        size=path_stat.st_size,
+    )
+
+
+def _capture_path_state(target: Path, workspace_root: Path) -> _DocumentPathState:
+    """Capture target and every parent identity up to the workspace root."""
+    try:
+        target.relative_to(workspace_root)
+    except ValueError as exc:
+        raise WorkspacePathError("Document path escapes the workspace root") from exc
+
+    target_fingerprint = _fingerprint(target, expect_directory=False)
+    parents: list[_DocumentPathFingerprint] = []
+    current = target.parent
+    while True:
+        parents.append(_fingerprint(current, expect_directory=True))
+        if current == workspace_root:
+            break
+        try:
+            current = current.parent
+            current.relative_to(workspace_root)
+        except ValueError as exc:
+            raise WorkspacePathError("Document parent escapes the workspace root") from exc
+    return _DocumentPathState(target=target_fingerprint, parents=tuple(parents))
+
+
+def _fingerprint_matches(
+    fingerprint: _DocumentPathFingerprint,
+    path_stat: os.stat_result,
+) -> bool:
+    return (
+        fingerprint.device == path_stat.st_dev
+        and fingerprint.inode == path_stat.st_ino
+        and fingerprint.mode == path_stat.st_mode
+        and fingerprint.modified_ns == path_stat.st_mtime_ns
+        and fingerprint.changed_ns == path_stat.st_ctime_ns
+        and fingerprint.size == path_stat.st_size
+    )
+
+
+def _path_state_matches(state: _DocumentPathState) -> bool:
+    try:
+        if not _fingerprint_matches(state.target, os.lstat(state.target.path)):
+            return False
+        return all(_fingerprint_matches(parent, os.lstat(parent.path)) for parent in state.parents)
+    except OSError:
+        return False
+
+
+def _descriptor_matches(
+    fingerprint: _DocumentPathFingerprint,
+    descriptor_stat: os.stat_result,
+) -> bool:
+    return (
+        fingerprint.device == descriptor_stat.st_dev
+        and fingerprint.inode == descriptor_stat.st_ino
+        and fingerprint.mode == descriptor_stat.st_mode
+        and fingerprint.size == descriptor_stat.st_size
+    )
+
+
 def _read_source(workspace: Workspace, requested: str) -> tuple[Path, bytes]:
     try:
         target = _resolve_document_path(workspace, requested)
@@ -98,14 +199,24 @@ def _read_source(workspace: Workspace, requested: str) -> tuple[Path, bytes]:
         raise _DocumentReadError("not_found", f"Workspace document does not exist: {requested}")
     if not target.is_file():
         raise _DocumentReadError("not_a_file", f"Workspace path is not a file: {requested}")
+    state = _capture_path_state(target, workspace.root)
     try:
-        if target.stat().st_size > MAX_DOCUMENT_SOURCE_BYTES:
-            raise _DocumentReadError(
-                "too_large",
-                f"Document exceeds the {MAX_DOCUMENT_SOURCE_BYTES}-byte limit.",
-            )
         with target.open("rb") as source:
+            descriptor_stat = os.fstat(source.fileno())
+            if not _descriptor_matches(state.target, descriptor_stat) or not _path_state_matches(
+                state
+            ):
+                raise WorkspacePathError("Document path changed before it was read")
+            if descriptor_stat.st_size > MAX_DOCUMENT_SOURCE_BYTES:
+                raise _DocumentReadError(
+                    "too_large",
+                    f"Document exceeds the {MAX_DOCUMENT_SOURCE_BYTES}-byte limit.",
+                )
             data = source.read(MAX_DOCUMENT_SOURCE_BYTES + 1)
+            if not _descriptor_matches(state.target, os.fstat(source.fileno())):
+                raise WorkspacePathError("Document file changed while it was being read")
+            if not _path_state_matches(state):
+                raise WorkspacePathError("Document parent path changed while it was being read")
     except _DocumentReadError:
         raise
     except OSError as exc:
@@ -159,6 +270,25 @@ def _validate_docx_container(data: bytes) -> None:
         raise _DocumentReadError("invalid_document", "DOCX container could not be read") from exc
 
 
+def _append_bounded_block(
+    blocks: list[str],
+    block: str,
+    current_chars: int,
+) -> tuple[int, bool]:
+    """Append one text block while keeping the worker result bounded."""
+    if not block:
+        return current_chars, False
+    separator = 1 if blocks else 0
+    available = MAX_DOCUMENT_TEXT_CHARS + 1 - current_chars - separator
+    if available <= 0:
+        return current_chars, True
+    if len(block) > available:
+        blocks.append(block[:available])
+        return current_chars + separator + available, True
+    blocks.append(block)
+    return current_chars + separator + len(block), False
+
+
 def _extract_pdf(data: bytes, start_page: int, end_page: int | None) -> dict[str, Any]:
     from pypdf import PdfReader
 
@@ -173,13 +303,22 @@ def _extract_pdf(data: bytes, start_page: int, end_page: int | None) -> dict[str
         raise _DocumentReadError("page_range", "Requested PDF page range is outside the document")
     actual_end = min(requested_end, total_pages)
     blocks: list[str] = []
+    text_chars = 0
+    text_truncated = False
+    selected_text_pages = 0
     for number in range(start_page, actual_end + 1):
         text = reader.pages[number - 1].extract_text() or ""
         if text:
-            blocks.append(text)
+            selected_text_pages += 1
+            text_chars, text_truncated = _append_bounded_block(blocks, text, text_chars)
+            if text_truncated:
+                break
     return {
         "text": "\n".join(blocks),
+        "text_truncated": text_truncated,
         "total_pages": total_pages,
+        "selected_pages": actual_end - start_page + 1,
+        "selected_text_pages": selected_text_pages,
         "requested_start_page": start_page,
         "requested_end_page": requested_end,
         "processed_start_page": start_page,
@@ -195,6 +334,8 @@ def _extract_docx(data: bytes) -> dict[str, Any]:
 
     document = Document(BytesIO(data))
     blocks: list[str] = []
+    text_chars = 0
+    text_truncated = False
     paragraph_count = 0
     table_count = 0
     for child in document.element.body.iterchildren():
@@ -202,19 +343,82 @@ def _extract_docx(data: bytes) -> dict[str, Any]:
             paragraph_count += 1
             text = Paragraph(child, document).text
             if text:
-                blocks.append(text)
+                text_chars, text_truncated = _append_bounded_block(blocks, text, text_chars)
         elif child.tag.endswith("}tbl"):
             table_count += 1
             table = Table(child, document)
             rows = ["\t".join(cell.text for cell in row.cells) for row in table.rows]
             if rows:
-                blocks.append("\n".join(rows))
+                text_chars, text_truncated = _append_bounded_block(
+                    blocks,
+                    "\n".join(rows),
+                    text_chars,
+                )
+        if text_truncated:
+            break
     return {
         "text": "\n".join(blocks),
+        "text_truncated": text_truncated,
         "paragraphs": paragraph_count,
         "tables": table_count,
         "location": "document order",
     }
+
+
+def _encode_result(result: dict[str, Any]) -> bytes:
+    return json.dumps(
+        result,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _bounded_result_payload(result: dict[str, Any]) -> bytes:
+    """Serialize a parser result without allowing an oversized IPC payload."""
+    candidate = dict(result)
+    text = candidate.get("text")
+    if isinstance(text, str) and len(text) > MAX_DOCUMENT_TEXT_CHARS + 1:
+        candidate["text"] = text[: MAX_DOCUMENT_TEXT_CHARS + 1]
+        candidate["text_truncated"] = True
+    payload = _encode_result(candidate)
+    if len(payload) <= MAX_DOCUMENT_RESULT_BYTES:
+        return payload
+
+    if isinstance(text, str):
+        text_candidate = candidate["text"]
+        low = 0
+        high = len(text_candidate)
+        best = b""
+        while low <= high:
+            middle = (low + high) // 2
+            candidate["text"] = text_candidate[:middle]
+            candidate["text_truncated"] = True
+            trial = _encode_result(candidate)
+            if len(trial) <= MAX_DOCUMENT_RESULT_BYTES:
+                best = trial
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best:
+            return best
+    return _encode_result(
+        {
+            "error_status": "resource_limit",
+            "error_message": "Document parser result exceeded the size limit",
+        }
+    )
+
+
+def _sanitize_worker_environment() -> None:
+    """Keep parser workers independent from model and unrelated credentials."""
+    allowed = {
+        key: value
+        for key, value in os.environ.items()
+        if key.casefold() in {"path", "pathext", "systemroot", "windir", "temp", "tmp"}
+    }
+    os.environ.clear()
+    os.environ.update(allowed)
 
 
 def _parse_worker(
@@ -222,21 +426,43 @@ def _parse_worker(
     data: bytes,
     start_page: int | None,
     end_page: int | None,
-    result_queue: Queue,
+    result_connection: Connection,
 ) -> None:
     try:
+        _sanitize_worker_environment()
         if format_name == "pdf":
             result = _extract_pdf(data, start_page or 1, end_page)
         else:
             result = _extract_docx(data)
     except _DocumentReadError as exc:
-        result_queue.put({"error_status": exc.status, "error_message": exc.message})
+        result = {"error_status": exc.status, "error_message": exc.message}
     except Exception:
-        result_queue.put(
-            {"error_status": "parse_error", "error_message": "Document parsing failed"}
-        )
-    else:
-        result_queue.put(result)
+        result = {"error_status": "parse_error", "error_message": "Document parsing failed"}
+    try:
+        result_connection.send_bytes(_bounded_result_payload(result))
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        result_connection.close()
+
+
+def _terminate_parse_process(process: multiprocessing.Process) -> bool:
+    if not process.is_alive():
+        return True
+    try:
+        process.terminate()
+    except (OSError, RuntimeError):
+        return False
+    process.join(0.5)
+    if process.is_alive():
+        killer = getattr(process, "kill", None)
+        if callable(killer):
+            try:
+                killer()
+            except (OSError, RuntimeError):
+                return False
+            process.join(0.5)
+    return not process.is_alive()
 
 
 def _parse_document(
@@ -247,42 +473,62 @@ def _parse_document(
     timeout_seconds: float = MAX_DOCUMENT_PARSE_SECONDS,
 ) -> dict[str, Any]:
     context = multiprocessing.get_context("spawn")
-    result_queue: Queue = context.Queue(maxsize=1)
+    receive_connection, send_connection = context.Pipe(duplex=False)
     process = context.Process(
         target=_parse_worker,
-        args=(format_name, data, start_page, end_page, result_queue),
+        args=(format_name, data, start_page, end_page, send_connection),
     )
     started = False
     try:
         process.start()
         started = True
+        send_connection.close()
         deadline = time.monotonic() + timeout_seconds
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                process.terminate()
-                process.join(1.0)
+                terminated = _terminate_parse_process(process)
+                if not terminated:
+                    raise _DocumentReadError(
+                        "parse_error", "Document parser could not be terminated safely"
+                    )
                 raise _DocumentReadError(
                     "parse_timeout", "Document parsing exceeded the time limit"
                 )
-            try:
-                result = result_queue.get(timeout=min(0.1, remaining))
-                break
-            except queue.Empty:
-                if process.is_alive():
-                    continue
+            if receive_connection.poll(min(0.1, remaining)):
                 try:
-                    result = result_queue.get(timeout=min(0.2, remaining))
-                    break
-                except queue.Empty as empty_exc:
+                    payload = receive_connection.recv_bytes(MAX_DOCUMENT_RESULT_BYTES)
+                except EOFError as exc:
+                    _terminate_parse_process(process)
                     raise _DocumentReadError(
                         "parse_error", "Document parser returned no result"
-                    ) from empty_exc
+                    ) from exc
+                except OSError as exc:
+                    terminated = _terminate_parse_process(process)
+                    if not terminated:
+                        raise _DocumentReadError(
+                            "parse_error", "Document parser could not be terminated safely"
+                        ) from exc
+                    raise _DocumentReadError(
+                        "resource_limit", "Document parser result exceeded the size limit"
+                    ) from exc
+                try:
+                    result = json.loads(payload)
+                except (UnicodeDecodeError, json.JSONDecodeError, TypeError) as exc:
+                    raise _DocumentReadError(
+                        "parse_error", "Document parser returned invalid data"
+                    ) from exc
+                if not isinstance(result, dict):
+                    raise _DocumentReadError("parse_error", "Document parser returned invalid data")
+                break
+            if not process.is_alive():
+                raise _DocumentReadError("parse_error", "Document parser returned no result")
         remaining = max(0.0, deadline - time.monotonic())
         process.join(min(1.0, remaining))
-        if process.is_alive():
-            process.terminate()
-            process.join(1.0)
+        if process.is_alive() and not _terminate_parse_process(process):
+            raise _DocumentReadError(
+                "parse_error", "Document parser could not be terminated safely"
+            )
         if "error_status" in result:
             raise _DocumentReadError(result["error_status"], result["error_message"])
         return result
@@ -292,10 +538,10 @@ def _parse_document(
         raise _DocumentReadError("parse_error", "Document parser could not be started") from exc
     finally:
         if started and process.is_alive():
-            process.terminate()
-            process.join(1.0)
-        result_queue.close()
-        result_queue.join_thread()
+            _terminate_parse_process(process)
+        receive_connection.close()
+        if not started:
+            send_connection.close()
 
 
 def _truncate_text(text: str) -> tuple[str, bool]:
@@ -335,24 +581,32 @@ class _ReadDocumentHandler:
                 arguments.start_page,
                 arguments.end_page,
             )
+            parser_text_truncated = bool(parsed.pop("text_truncated", False))
             text, text_truncated = _truncate_text(parsed.pop("text", ""))
             if not text:
+                if format_name == "pdf":
+                    message = (
+                        "The selected PDF pages contain no extractable text; "
+                        "unread pages may contain text."
+                    )
+                else:
+                    message = (
+                        "Document has no extractable text; it may be scanned or "
+                        "contain no text layer."
+                    )
                 details = {
                     "path": arguments.path,
                     "format": format_name,
                     "text": "",
                     "truncated": False,
-                    "message": (
-                        "Document has no extractable text; it may be scanned or "
-                        "contain no text layer."
-                    ),
+                    "message": message,
                     **parsed,
                 }
                 return ToolOutput(status="no_text", details=details, is_error=True)
             reasons: list[str] = []
             if parsed.pop("page_truncated", False):
                 reasons.append("page_limit")
-            if text_truncated:
+            if parser_text_truncated or text_truncated:
                 reasons.append("text_limit")
             details: dict[str, Any] = {
                 "path": arguments.path,
@@ -390,6 +644,7 @@ __all__ = [
     "DOCUMENT_TRUNCATION_MARKER",
     "MAX_DOCUMENT_PAGES",
     "MAX_DOCUMENT_PARSE_SECONDS",
+    "MAX_DOCUMENT_RESULT_BYTES",
     "MAX_DOCUMENT_SOURCE_BYTES",
     "MAX_DOCUMENT_TEXT_CHARS",
     "MAX_DOCX_ENTRIES",
