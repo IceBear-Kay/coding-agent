@@ -71,6 +71,10 @@ class SessionLease:
         identity = self._identity
         if descriptor is None or identity is None:
             return False
+        return self._path_matches(descriptor, identity)
+
+    def _path_matches(self, descriptor: int, identity: tuple[int, int]) -> bool:
+        """Check that the lock path still names this lease's opened file."""
         try:
             current = self.path.lstat()
             descriptor_stat = os.fstat(descriptor)
@@ -102,22 +106,26 @@ class SessionLease:
 
         self._descriptor = descriptor
         try:
-            os.write(descriptor, str(os.getpid()).encode("ascii"))
-            os.fsync(descriptor)
             descriptor_stat = os.fstat(descriptor)
             self._identity = (descriptor_stat.st_dev, descriptor_stat.st_ino)
+            os.write(descriptor, str(os.getpid()).encode("ascii"))
+            os.fsync(descriptor)
         except BaseException as exc:
             cleanup_error: OSError | None = None
+            owns_path = self._identity is not None and self._path_matches(
+                descriptor, self._identity
+            )
             try:
                 os.close(descriptor)
             except OSError as close_exc:
                 cleanup_error = close_exc
             self._descriptor = None
             self._identity = None
-            try:
-                self.path.unlink()
-            except OSError as unlink_exc:
-                cleanup_error = unlink_exc
+            if owns_path:
+                try:
+                    self.path.unlink()
+                except OSError as unlink_exc:
+                    cleanup_error = unlink_exc
             if cleanup_error is not None:
                 raise SessionStoreError(
                     "session lock initialization failed and cleanup failed"
@@ -131,20 +139,28 @@ class SessionLease:
 
     def release(self) -> None:
         descriptor = self._descriptor
-        if descriptor is None:
+        identity = self._identity
+        if descriptor is None or identity is None:
             return
-        self._descriptor = None
-        self._identity = None
         close_error: OSError | None = None
+        ownership_error: SessionStoreError | None = None
+        owns_path = self._path_matches(descriptor, identity)
+        if not owns_path:
+            ownership_error = SessionStoreError("session lock ownership changed before release")
         try:
             os.close(descriptor)
         except OSError as exc:
             close_error = exc
-        try:
-            self.path.unlink()
-        except OSError as exc:
-            if close_error is None:
-                close_error = exc
+        if owns_path:
+            try:
+                self.path.unlink()
+            except OSError as exc:
+                if close_error is None:
+                    close_error = exc
+        self._descriptor = None
+        self._identity = None
+        if ownership_error is not None:
+            raise ownership_error
         if close_error is not None:
             raise SessionStoreError("session lock could not be released") from close_error
 

@@ -180,6 +180,66 @@ def test_session_lease_holds_until_explicit_release(tmp_path: Path) -> None:
     replacement.release()
 
 
+def _can_rename_open_file(tmp_path: Path) -> bool:
+    source = tmp_path / "open-probe"
+    target = tmp_path / "open-probe-moved"
+    with source.open("w", encoding="utf-8"):
+        try:
+            source.rename(target)
+        except OSError:
+            return False
+    target.unlink(missing_ok=True)
+    return True
+
+
+def test_session_lease_release_does_not_remove_replacement_lock(tmp_path: Path) -> None:
+    if not _can_rename_open_file(tmp_path):
+        pytest.skip("platform does not permit moving an open lock file")
+    store = SessionStore(tmp_path / "sessions")
+    store.create("chat_1", tmp_path)
+    first = store.acquire("chat_1")
+    lock_path = store.root / ".chat_1.lock"
+    moved_path = store.root / ".chat_1.old"
+    lock_path.rename(moved_path)
+    second = store.acquire("chat_1")
+
+    with pytest.raises(SessionStoreError, match="ownership changed"):
+        first.release()
+    assert lock_path.exists()
+    assert second.held is True
+    with pytest.raises(SessionConflictError, match="already in use"):
+        store.acquire("chat_1")
+
+    second.release()
+    moved_path.unlink(missing_ok=True)
+
+
+def test_session_lease_init_failure_does_not_remove_replacement_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not _can_rename_open_file(tmp_path):
+        pytest.skip("platform does not permit moving an open lock file")
+    store = SessionStore(tmp_path / "sessions")
+    store.create("chat_1", tmp_path)
+    lock_path = store.root / ".chat_1.lock"
+    moved_path = store.root / ".chat_1.old"
+
+    def replace_then_fail(descriptor: int, payload: bytes) -> int:
+        lock_path.rename(moved_path)
+        lock_path.write_text("foreign", encoding="ascii")
+        raise OSError("simulated lock write failure")
+
+    monkeypatch.setattr(session_store_module.os, "write", replace_then_fail)
+    with pytest.raises(SessionStoreError, match="initialization failed"):
+        store.acquire("chat_1")
+
+    assert lock_path.read_text(encoding="ascii") == "foreign"
+    with pytest.raises(SessionConflictError, match="already in use"):
+        store.acquire("chat_1")
+    lock_path.unlink(missing_ok=True)
+    moved_path.unlink(missing_ok=True)
+
+
 def test_session_lease_initialization_failure_cleans_its_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
