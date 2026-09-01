@@ -62,6 +62,7 @@ class TaskStats(BaseModel):
     context_max_bytes: int | None = Field(default=None, ge=1)
     context_trimmed_tasks: int = Field(default=0, ge=0)
     runtime_seconds: float = Field(default=0.0, ge=0.0)
+    stop_reason: str | None = Field(default=None, min_length=1)
 
     @property
     def usage_complete(self) -> bool:
@@ -97,6 +98,14 @@ class TaskStats(BaseModel):
     @property
     def duration_seconds(self) -> float:
         return self.runtime_seconds
+
+    @property
+    def context_exceeded(self) -> bool:
+        return (
+            self.context_bytes is not None
+            and self.context_max_bytes is not None
+            and self.context_bytes > self.context_max_bytes
+        )
 
 
 class AgentState(BaseModel):

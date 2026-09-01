@@ -159,6 +159,7 @@ class AgentLoop:
             error: BaseException | None = None,
         ) -> AgentRunResult:
             state.stats.runtime_seconds = max(0.0, time.monotonic() - started_at)
+            state.stats.stop_reason = state.stop_reason
             return AgentRunResult(answer=answer, state=state, error=error)
 
         try:
