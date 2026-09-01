@@ -49,6 +49,45 @@ def test_cli_parser_accepts_chat_mode() -> None:
     assert args.task is None
 
 
+def test_cli_parser_preserves_unspecified_defaults_for_mode_and_permissions() -> None:
+    args = build_parser().parse_args([])
+
+    assert args.chat is None
+    assert args.allow_write is None
+    assert args.allow_exec is None
+    assert args.read_only is False
+    assert args.show_tool_events is None
+    assert args.command_timeout == 20.0
+
+
+def test_cli_parser_accepts_explicit_disable_switches() -> None:
+    args = build_parser().parse_args(
+        ["--no-chat", "--no-write", "--no-exec", "--read-only", "--hide-tool-events"]
+    )
+
+    assert args.chat is False
+    assert args.allow_write is False
+    assert args.allow_exec is False
+    assert args.read_only is True
+    assert args.show_tool_events is False
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("--chat", "--no-chat"),
+        ("--allow-write", "--no-write"),
+        ("--allow-exec", "--no-exec"),
+        ("--show-tool-events", "--hide-tool-events"),
+    ],
+)
+def test_cli_parser_rejects_opposite_switches(flags: tuple[str, str]) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(list(flags))
+
+    assert exc_info.value.code == 2
+
+
 def test_cli_parser_accepts_context_budget() -> None:
     args = build_parser().parse_args(["--max-context-bytes", "4096"])
 
@@ -101,6 +140,73 @@ def test_cli_chat_rejects_positional_task_without_provider_call(tmp_path: Path) 
     assert exit_code == 2
     assert errors == ["错误: --chat 不能与位置任务同时使用"]
     assert provider.requests == []
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("--read-only", "--allow-write"),
+        ("--allow-write", "--read-only"),
+        ("--read-only", "--allow-exec"),
+        ("--allow-exec", "--read-only"),
+    ],
+)
+def test_cli_rejects_read_only_enable_conflicts_before_provider_call(
+    tmp_path: Path,
+    flags: tuple[str, str],
+) -> None:
+    provider = FakeProvider([])
+    errors: list[str] = []
+
+    exit_code = main(
+        ["Inspect", "--workspace", str(tmp_path), *flags],
+        provider=provider,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 2
+    assert errors == ["错误: --read-only 不能与 --allow-write 或 --allow-exec 同时使用"]
+    assert provider.requests == []
+
+
+def test_cli_defaults_to_chat_when_task_is_omitted(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(text="第一轮回答", finish_reason="stop"),
+            ModelResponse(text="第二轮回答", finish_reason="stop"),
+        ]
+    )
+    inputs = iter(["第一项任务", "第二项任务", "/exit"])
+
+    exit_code = main(
+        ["--workspace", str(tmp_path)],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+    )
+
+    assert exit_code == 0
+    assert len(provider.requests) == 2
+    assert provider.requests[0][0][-1].content == "第一项任务"
+    assert provider.requests[1][0][-1].content == "第二项任务"
+
+
+def test_cli_positional_task_defaults_to_single_run_without_reading_input(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider([ModelResponse(text="完成", finish_reason="stop")])
+
+    def unexpected_input(_: str) -> str:
+        raise AssertionError("single-task mode must not read another task")
+
+    exit_code = main(
+        ["检查工作区", "--workspace", str(tmp_path)],
+        provider=provider,
+        input_fn=unexpected_input,
+    )
+
+    assert exit_code == 0
+    assert len(provider.requests) == 1
+    assert provider.requests[0][0][-1].content == "检查工作区"
 
 
 def test_cli_chat_preserves_history_and_resets_each_task_budget(tmp_path: Path) -> None:
@@ -202,6 +308,7 @@ def test_cli_chat_clear_allows_new_task_after_history_budget_would_be_exceeded(
             "--chat",
             "--workspace",
             str(tmp_path),
+            "--read-only",
             "--max-steps",
             "1",
             "--max-context-bytes",
@@ -300,7 +407,7 @@ def test_cli_does_not_parse_read_file_json_as_execution_status(tmp_path: Path) -
     output: list[str] = []
 
     exit_code = main(
-        ["读取 note.txt", "--workspace", str(tmp_path)],
+        ["读取 note.txt", "--workspace", str(tmp_path), "--read-only"],
         provider=provider,
         output_fn=output.append,
     )
@@ -332,7 +439,7 @@ def test_cli_handles_large_integer_read_file_content_without_aborting(tmp_path: 
 
     output: list[str] = []
     exit_code = main(
-        ["读取 numbers.txt", "--workspace", str(tmp_path)],
+        ["读取 numbers.txt", "--workspace", str(tmp_path), "--read-only"],
         provider=provider,
         output_fn=output.append,
     )
@@ -363,7 +470,14 @@ def test_cli_runs_injected_provider_and_passes_workspace_and_task(tmp_path: Path
     errors: list[str] = []
 
     exit_code = main(
-        ["Read README.md", "--workspace", str(tmp_path), "--max-steps", "3"],
+        [
+            "Read README.md",
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+            "--max-steps",
+            "3",
+        ],
         provider=provider,
         output_fn=output.append,
         error_fn=errors.append,
@@ -378,13 +492,88 @@ def test_cli_runs_injected_provider_and_passes_workspace_and_task(tmp_path: Path
     assert provider.requests[0][0][1].content == "Read README.md"
 
 
+def test_cli_hiding_tool_events_preserves_execution_and_history(tmp_path: Path) -> None:
+    (tmp_path / "note.txt").write_text("Project contents", encoding="utf-8")
+
+    def run(flags: tuple[str, ...]) -> tuple[FakeProvider, list[str], int]:
+        provider = FakeProvider(
+            [
+                ModelResponse(
+                    tool_calls=[
+                        ToolCall(
+                            id="call_hidden_read",
+                            name="read_file",
+                            arguments={"path": "note.txt"},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                ),
+                ModelResponse(text="文件已读取。", finish_reason="stop"),
+            ]
+        )
+        output: list[str] = []
+        exit_code = main(
+            ["读取 note.txt", "--workspace", str(tmp_path), "--read-only", *flags],
+            provider=provider,
+            output_fn=output.append,
+        )
+        return provider, output, exit_code
+
+    shown_provider, shown_output, shown_exit_code = run(())
+    hidden_provider, hidden_output, hidden_exit_code = run(("--hide-tool-events",))
+    explicit_provider, explicit_output, explicit_exit_code = run(("--show-tool-events",))
+
+    assert shown_exit_code == hidden_exit_code == explicit_exit_code == 0
+    assert shown_provider.requests == hidden_provider.requests == explicit_provider.requests
+    assert shown_output == explicit_output
+    assert shown_output[0].startswith("工具调用: read_file")
+    assert shown_output[1] == "工具结果 read_file: 已返回"
+    assert hidden_output == ["文件已读取。", "停止原因: completed"]
+
+
+def test_cli_hiding_tool_events_keeps_approval_and_errors_visible(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_hidden_write",
+                        name="write_file",
+                        arguments={"path": "denied.txt", "content": "content"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="写入已拒绝。", finish_reason="stop"),
+        ]
+    )
+    output: list[str] = []
+
+    exit_code = main(
+        ["Create denied.txt", "--workspace", str(tmp_path), "--hide-tool-events"],
+        provider=provider,
+        input_fn=lambda _: "",
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert not (tmp_path / "denied.txt").exists()
+    assert not any(message.startswith("工具调用:") for message in output)
+    assert any(message.startswith("待审批操作:") for message in output)
+    assert any("审批结果: 已拒绝" in message for message in output)
+    assert any(
+        message.startswith("工具结果 write_file:") and "错误" in message for message in output
+    )
+    assert output[-2:] == ["写入已拒绝。", "停止原因: completed"]
+
+
 def test_cli_prompts_for_task_when_argument_is_omitted(tmp_path: Path) -> None:
     provider = FakeProvider([ModelResponse(text="Done", finish_reason="stop")])
     prompts: list[str] = []
     output: list[str] = []
 
     exit_code = main(
-        ["--workspace", str(tmp_path)],
+        ["--workspace", str(tmp_path), "--no-chat", "--read-only"],
         provider=provider,
         input_fn=lambda prompt: prompts.append(prompt) or "Inspect the workspace",
         output_fn=output.append,
@@ -413,7 +602,14 @@ def test_cli_reports_max_steps_without_requesting_another_response(tmp_path: Pat
     errors: list[str] = []
 
     exit_code = main(
-        ["Inspect files", "--workspace", str(tmp_path), "--max-steps", "1"],
+        [
+            "Inspect files",
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+            "--max-steps",
+            "1",
+        ],
         provider=provider,
         error_fn=errors.append,
     )
@@ -427,7 +623,7 @@ def test_cli_rejects_empty_interactive_task(tmp_path: Path) -> None:
     errors: list[str] = []
 
     exit_code = main(
-        ["--workspace", str(tmp_path)],
+        ["--workspace", str(tmp_path), "--no-chat", "--read-only"],
         provider=FakeProvider([]),
         input_fn=lambda _: "  ",
         error_fn=errors.append,
@@ -444,7 +640,7 @@ def test_cli_handles_keyboard_interrupt_during_input(tmp_path: Path) -> None:
         raise KeyboardInterrupt
 
     exit_code = main(
-        ["--workspace", str(tmp_path)],
+        ["--workspace", str(tmp_path), "--no-chat", "--read-only"],
         provider=FakeProvider([]),
         input_fn=interrupt,
         error_fn=errors.append,
@@ -466,7 +662,7 @@ def test_cli_handles_keyboard_interrupt_during_initialization(
     monkeypatch.setattr("coding_agent.cli.Workspace", interrupt_workspace)
 
     exit_code = main(
-        ["Inspect files", "--workspace", str(tmp_path)],
+        ["Inspect files", "--workspace", str(tmp_path), "--read-only"],
         provider=FakeProvider([]),
         error_fn=errors.append,
     )
@@ -483,7 +679,7 @@ def test_cli_handles_keyboard_interrupt_during_output(tmp_path: Path) -> None:
         raise KeyboardInterrupt
 
     exit_code = main(
-        ["Finish the task", "--workspace", str(tmp_path)],
+        ["Finish the task", "--workspace", str(tmp_path), "--read-only"],
         provider=provider,
         output_fn=interrupt_output,
         error_fn=errors.append,
@@ -493,7 +689,32 @@ def test_cli_handles_keyboard_interrupt_during_output(tmp_path: Path) -> None:
     assert errors == ["停止原因: interrupted"]
 
 
-def test_cli_defaults_to_read_only_tools_even_if_model_requests_write(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("flags", "expected_names"),
+    [
+        ((), ["list_files", "read_file", "write_file", "edit_file", "run_command"]),
+        (("--no-write",), ["list_files", "read_file", "run_command"]),
+        (("--no-exec",), ["list_files", "read_file", "write_file", "edit_file"]),
+        (("--read-only",), ["list_files", "read_file"]),
+    ],
+)
+def test_cli_permission_switches_control_exposed_tool_schemas(
+    tmp_path: Path,
+    flags: tuple[str, ...],
+    expected_names: list[str],
+) -> None:
+    provider = FakeProvider([ModelResponse(text="完成", finish_reason="stop")])
+
+    exit_code = main(
+        ["Inspect", "--workspace", str(tmp_path), *flags],
+        provider=provider,
+    )
+
+    assert exit_code == 0
+    assert [schema["function"]["name"] for schema in provider.requests[0][1]] == expected_names
+
+
+def test_cli_read_only_tools_reject_model_requested_write(tmp_path: Path) -> None:
     provider = FakeProvider(
         [
             ModelResponse(
@@ -512,7 +733,14 @@ def test_cli_defaults_to_read_only_tools_even_if_model_requests_write(tmp_path: 
     approval_prompts: list[str] = []
 
     exit_code = main(
-        ["Create a file", "--workspace", str(tmp_path), "--max-steps", "3"],
+        [
+            "Create a file",
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+            "--max-steps",
+            "3",
+        ],
         provider=provider,
         input_fn=lambda prompt: approval_prompts.append(prompt) or "y",
     )
@@ -555,6 +783,7 @@ def test_cli_executes_approved_command_with_configured_limits(tmp_path: Path) ->
             "--workspace",
             str(tmp_path),
             "--allow-exec",
+            "--no-write",
             "--command-timeout",
             "2",
             "--command-output-limit",
@@ -601,7 +830,7 @@ def test_cli_does_not_expose_run_command_without_allow_exec(tmp_path: Path) -> N
     )
 
     exit_code = main(
-        ["Run a command", "--workspace", str(tmp_path)],
+        ["Run a command", "--workspace", str(tmp_path), "--no-write", "--no-exec"],
         provider=provider,
         input_fn=lambda _: "y",
     )
@@ -625,6 +854,7 @@ def test_cli_rejects_invalid_command_limits_before_provider_call(tmp_path: Path)
             "--workspace",
             str(tmp_path),
             "--allow-exec",
+            "--no-write",
             "--command-timeout",
             "61",
         ],
@@ -680,6 +910,43 @@ def test_cli_default_input_rejects_redirected_command_approval(
     assert json.loads(tool_message.content)["status"] == "denied"
 
 
+def test_cli_defaults_to_enabled_tools_but_still_requires_approval(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_default_write",
+                        name="write_file",
+                        arguments={"path": "not-created.txt", "content": "content"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="写入已拒绝。", finish_reason="stop"),
+        ]
+    )
+    output: list[str] = []
+
+    exit_code = main(
+        ["Create a file", "--workspace", str(tmp_path)],
+        provider=provider,
+        input_fn=lambda _: "",
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert not (tmp_path / "not-created.txt").exists()
+    assert any("审批结果: 已拒绝" in message for message in output)
+    assert [schema["function"]["name"] for schema in provider.requests[0][1]] == [
+        "list_files",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "run_command",
+    ]
+
+
 def test_cli_approves_write_and_edit_as_separate_operations(tmp_path: Path) -> None:
     provider = FakeProvider(
         [
@@ -720,6 +987,7 @@ def test_cli_approves_write_and_edit_as_separate_operations(tmp_path: Path) -> N
             "--workspace",
             str(tmp_path),
             "--allow-write",
+            "--no-exec",
             "--max-steps",
             "4",
         ],
@@ -773,7 +1041,13 @@ def test_cli_default_input_rejects_redirected_approval(
     monkeypatch.setattr(sys, "stdin", redirected_input)
 
     exit_code = main(
-        ["Create redirected.txt", "--workspace", str(tmp_path), "--allow-write"],
+        [
+            "Create redirected.txt",
+            "--workspace",
+            str(tmp_path),
+            "--allow-write",
+            "--no-exec",
+        ],
         provider=provider,
         output_fn=output.append,
     )
@@ -808,7 +1082,13 @@ def test_cli_rejected_or_empty_approval_does_not_write_file(
     )
 
     exit_code = main(
-        ["Create denied.txt", "--workspace", str(tmp_path), "--allow-write"],
+        [
+            "Create denied.txt",
+            "--workspace",
+            str(tmp_path),
+            "--allow-write",
+            "--no-exec",
+        ],
         provider=provider,
         input_fn=lambda _: answer,
     )
@@ -841,7 +1121,13 @@ def test_cli_eof_during_approval_denies_operation(tmp_path: Path) -> None:
         raise EOFError
 
     exit_code = main(
-        ["Create denied.txt", "--workspace", str(tmp_path), "--allow-write"],
+        [
+            "Create denied.txt",
+            "--workspace",
+            str(tmp_path),
+            "--allow-write",
+            "--no-exec",
+        ],
         provider=provider,
         input_fn=end_input,
         output_fn=output.append,
@@ -877,7 +1163,13 @@ def test_cli_keyboard_interrupt_during_approval_stops_without_writing(
         raise KeyboardInterrupt
 
     exit_code = main(
-        ["Create interrupted.txt", "--workspace", str(tmp_path), "--allow-write"],
+        [
+            "Create interrupted.txt",
+            "--workspace",
+            str(tmp_path),
+            "--allow-write",
+            "--no-exec",
+        ],
         provider=provider,
         input_fn=interrupt,
         error_fn=errors.append,
@@ -921,7 +1213,13 @@ def test_cli_keyboard_interrupt_during_edit_cleans_up_and_returns_130(
     monkeypatch.setattr("coding_agent.file_tools.os.fsync", interrupt_fsync)
 
     exit_code = main(
-        ["Edit notes.txt", "--workspace", str(tmp_path), "--allow-write"],
+        [
+            "Edit notes.txt",
+            "--workspace",
+            str(tmp_path),
+            "--allow-write",
+            "--no-exec",
+        ],
         provider=provider,
         input_fn=lambda _: "y",
         error_fn=errors.append,

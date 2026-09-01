@@ -25,6 +25,7 @@ from coding_agent.command_tools import (
 from coding_agent.config import ProviderConfig
 from coding_agent.errors import ProviderError
 from coding_agent.file_tools import create_workspace_registry
+from coding_agent.models import ToolResult
 from coding_agent.provider import ModelProvider, OpenAICompatibleProvider
 from coding_agent.session import AgentSession
 from coding_agent.tools import Workspace
@@ -51,12 +52,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "task",
         nargs="?",
-        help="发送给 agent 的单次任务；省略后将交互式输入，不能与 --chat 同时使用。",
+        help="发送给 agent 的单次任务；省略后默认进入聊天，可用 --no-chat 改为单次输入。",
     )
-    parser.add_argument(
+    chat_group = parser.add_mutually_exclusive_group()
+    chat_group.add_argument(
         "--chat",
+        dest="chat",
         action="store_true",
+        default=None,
         help="进入同一进程内的连续任务会话；不能与位置任务同时使用。",
+    )
+    chat_group.add_argument(
+        "--no-chat",
+        dest="chat",
+        action="store_false",
+        help="关闭连续任务会话；省略位置任务时只读取一次输入。",
     )
     parser.add_argument(
         "--workspace",
@@ -64,15 +74,52 @@ def build_parser() -> argparse.ArgumentParser:
         default=".",
         help="工作区目录（默认：当前目录）。",
     )
-    parser.add_argument(
+    write_group = parser.add_mutually_exclusive_group()
+    write_group.add_argument(
         "--allow-write",
+        dest="allow_write",
         action="store_true",
+        default=None,
         help="允许模型申请创建或精确修改文件；每次操作仍需确认。",
     )
-    parser.add_argument(
+    write_group.add_argument(
+        "--no-write",
+        dest="allow_write",
+        action="store_false",
+        help="关闭创建和修改文件工具。",
+    )
+    exec_group = parser.add_mutually_exclusive_group()
+    exec_group.add_argument(
         "--allow-exec",
+        dest="allow_exec",
         action="store_true",
+        default=None,
         help="允许模型申请执行本地命令；每次操作仍需确认。",
+    )
+    exec_group.add_argument(
+        "--no-exec",
+        dest="allow_exec",
+        action="store_false",
+        help="关闭本地命令工具。",
+    )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="同时关闭写入和命令执行工具。",
+    )
+    event_group = parser.add_mutually_exclusive_group()
+    event_group.add_argument(
+        "--show-tool-events",
+        dest="show_tool_events",
+        action="store_true",
+        default=None,
+        help="显示正常工具调用和结果提示（默认）。",
+    )
+    event_group.add_argument(
+        "--hide-tool-events",
+        dest="show_tool_events",
+        action="store_false",
+        help="隐藏正常工具调用和结果提示；审批、错误和最终回答仍显示。",
     )
     parser.add_argument(
         "--command-timeout",
@@ -142,9 +189,16 @@ def _report_result(
     return 130 if result.stop_reason == "interrupted" else 1
 
 
-def _report_event(event: AgentEvent, output_fn: Callable[[str], Any]) -> None:
+def _report_event(
+    event: AgentEvent,
+    output_fn: Callable[[str], Any],
+    *,
+    show_tool_events: bool = True,
+) -> None:
     """Render only concise facts from real tool calls and structured results."""
     if event.kind == "tool_call" and event.tool_call is not None:
+        if not show_tool_events:
+            return
         tool_call = event.tool_call
         details = _tool_call_summary(tool_call.name, tool_call.arguments)
         suffix = f"，{details}" if details else ""
@@ -153,11 +207,23 @@ def _report_event(event: AgentEvent, output_fn: Callable[[str], Any]) -> None:
 
     if event.kind == "tool_result" and event.tool_result is not None:
         result = event.tool_result
+        if not show_tool_events and not _tool_result_requires_notice(event.tool_name, result):
+            return
         status, details = _tool_result_summary(event.tool_name, result.content)
         detail_text = f"，{details}" if details else ""
         error_text = "，错误" if result.is_error else ""
         tool_name = f" {event.tool_name}" if event.tool_name else ""
         output_fn(f"工具结果{tool_name}: {status or '已返回'}{error_text}{detail_text}")
+
+
+def _tool_result_requires_notice(tool_name: str | None, result: ToolResult) -> bool:
+    """Keep failures visible while hiding successful routine tool progress."""
+    if result.is_error:
+        return True
+    if tool_name in {"list_files", "read_file"}:
+        return False
+    status, _ = _tool_result_summary(tool_name, result.content)
+    return status not in {"created", "edited", "completed"}
 
 
 def _tool_call_summary(tool_name: str, arguments: dict[str, Any]) -> str:
@@ -269,14 +335,29 @@ def main(
 
     try:
         args = build_parser().parse_args(argv)
-        if args.chat and args.task is not None:
+        if args.chat is True and args.task is not None:
             report_error("错误: --chat 不能与位置任务同时使用")
             return 2
 
+        if args.read_only and (args.allow_write is True or args.allow_exec is True):
+            report_error("错误: --read-only 不能与 --allow-write 或 --allow-exec 同时使用")
+            return 2
+
+        effective_chat = args.chat if args.chat is not None else args.task is None
+        effective_allow_write = (
+            False if args.read_only else True if args.allow_write is None else args.allow_write
+        )
+        effective_allow_exec = (
+            False if args.read_only else True if args.allow_exec is None else args.allow_exec
+        )
+        effective_show_tool_events = (
+            True if args.show_tool_events is None else args.show_tool_events
+        )
+
         task = args.task
-        if task is None and not args.chat:
+        if task is None and not effective_chat:
             task = input_fn("任务: ").strip()
-        if not args.chat and not task:
+        if not effective_chat and not task:
             report_error("错误: task 不能为空")
             return 2
 
@@ -295,9 +376,11 @@ def main(
 
         registry = create_workspace_registry(
             workspace,
-            allow_write=args.allow_write,
-            allow_exec=args.allow_exec,
-            approval_callback=approve_operation if (args.allow_write or args.allow_exec) else None,
+            allow_write=effective_allow_write,
+            allow_exec=effective_allow_exec,
+            approval_callback=approve_operation
+            if (effective_allow_write or effective_allow_exec)
+            else None,
             command_limits=command_limits,
         )
         selected_provider = provider if provider is not None else _default_provider()
@@ -309,9 +392,13 @@ def main(
             max_retries=args.max_retries,
             max_context_bytes=args.max_context_bytes,
             system_prompt=DEFAULT_SYSTEM_PROMPT,
-            event_callback=lambda event: _report_event(event, output_fn),
+            event_callback=lambda event: _report_event(
+                event,
+                output_fn,
+                show_tool_events=effective_show_tool_events,
+            ),
         )
-        if args.chat:
+        if effective_chat:
             return _run_chat(
                 AgentSession(loop),
                 input_fn,
