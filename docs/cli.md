@@ -59,6 +59,7 @@ uv run --env-file .env coding-agent --chat --resume demo-chat --session-dir .loc
 - `--allow-exec` / `--no-exec`：默认开放或关闭 `run_command`；每个命令仍需单独审批。
 - `--read-only`：同时关闭写入和执行工具；不能与显式 `--allow-write` 或 `--allow-exec` 同时使用。
 - `--show-tool-events` / `--hide-tool-events`：默认显示或隐藏正常工具调用和结果提示；隐藏时审批、错误、重要警告、最终回答和停止原因仍显示。
+- `--show-stats`：默认关闭；任务结束时显示本次运行的耗时、Provider 请求、工具调度、上下文和服务端 Token 摘要，不改变模型行为。
 - `--max-steps`：每个任务允许的 Provider 调用次数，默认 8；临时错误重试也计入预算。
 - `--max-retries`：每个任务中单次临时 Provider 错误最多重试次数，默认 2；设为 0 可关闭自动重试。
 - `--max-context-bytes`：每次 Provider 请求前的上下文 UTF-8 字节预算，默认 262144；必须为正整数，超限时按 `--context-policy` 处理。
@@ -77,6 +78,10 @@ uv run coding-agent --help
 工具调用和结果的正常过程提示默认显示。使用 `--hide-tool-events` 可隐藏这些提示，但不会影响 Provider 消息、工具执行或历史；审批预览、审批结果、工具错误、重要警告、最终回答和停止原因始终保留。`--show-tool-events` 可显式恢复显示，两者互斥。
 
 `--max-context-bytes` 使用内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数作为统一口径。它是软件级输入预算，不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证。每次实际 Provider 请求前都会检查预算；默认 `--context-policy stop` 超限时返回 `context_limit`，不发送请求；显式使用 `--context-policy trim` 时，按完整旧任务从最早开始裁剪，仍无法满足预算则返回 `context_limit`。裁剪不会摘要或重试请求。该预算独立于 `--max-steps` 的模型调用次数、`--max-retries` 的临时错误重试次数以及本地命令的 `--command-output-limit`。
+
+## 运行统计
+
+使用 `--show-stats` 可在每个任务结束时显示一行中文摘要。摘要中的 Provider 请求次数按真实调用计数并包含临时错误重试；工具调度次数按进入 Dispatcher 的次数计数，工具错误单独统计，不能理解为成功写入或命令运行次数。输入、输出和总 Token 只来自服务端返回的 `ModelResponse.usage`，无 usage 的响应或请求失败会显示未知请求数，不会用字节数估算。上下文显示最后一次请求前的实际 UTF-8 字节数与预算，并保留裁剪任务提示；统计不追加到消息历史，也不改变预算、审批、模型参数或工具结果。
 
 ## 经审批的文件修改
 

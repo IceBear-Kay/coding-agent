@@ -10,7 +10,7 @@ from coding_agent import session_store as session_store_module
 from coding_agent.agent import DEFAULT_SYSTEM_PROMPT
 from coding_agent.cli import build_parser, main
 from coding_agent.context import measure_context_bytes
-from coding_agent.models import Message, ModelResponse, ToolCall
+from coding_agent.models import Message, ModelResponse, ToolCall, Usage
 from coding_agent.provider import FakeProvider
 from coding_agent.session_store import SessionStore, SessionStoreError
 from coding_agent.tools import Workspace, create_read_only_registry
@@ -492,7 +492,46 @@ def test_cli_parser_preserves_unspecified_defaults_for_mode_and_permissions() ->
     assert args.allow_exec is None
     assert args.read_only is False
     assert args.show_tool_events is None
+    assert args.show_stats is False
     assert args.command_timeout == 20.0
+
+
+def test_cli_show_stats_reports_task_diagnostics_without_changing_default_output(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                text="Done",
+                finish_reason="stop",
+                usage=Usage(input_tokens=5, output_tokens=2, total_tokens=7),
+            )
+        ]
+    )
+    output: list[str] = []
+
+    exit_code = main(
+        ["Done task", "--workspace", str(tmp_path), "--read-only", "--show-stats"],
+        provider=provider,
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert output[0] == "Done"
+    assert output[1].startswith("运行统计: ")
+    assert "Provider 请求: 1 次" in output[1]
+    assert "输入 Token: 5" in output[1]
+    assert output[2] == "停止原因: completed"
+
+    default_output: list[str] = []
+    exit_code = main(
+        ["Done task", "--workspace", str(tmp_path), "--read-only"],
+        provider=FakeProvider([ModelResponse(text="Done", finish_reason="stop")]),
+        output_fn=default_output.append,
+    )
+
+    assert exit_code == 0
+    assert default_output == ["Done", "停止原因: completed"]
 
 
 def test_cli_parser_accepts_explicit_disable_switches() -> None:

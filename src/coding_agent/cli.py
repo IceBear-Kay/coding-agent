@@ -141,6 +141,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="隐藏正常工具调用和结果提示；审批、错误和最终回答仍显示。",
     )
     parser.add_argument(
+        "--show-stats",
+        action="store_true",
+        help="任务结束时显示本次运行统计；默认不显示。",
+    )
+    parser.add_argument(
         "--command-timeout",
         type=float,
         default=DEFAULT_COMMAND_TIMEOUT_SECONDS,
@@ -200,6 +205,8 @@ def _report_result(
     result: AgentRunResult,
     output_fn: Callable[[str], Any],
     error_fn: Callable[[str], Any],
+    *,
+    show_stats: bool = False,
 ) -> int:
     if result.answer is not None:
         output_fn(result.answer)
@@ -215,6 +222,9 @@ def _report_result(
             f"完整历史仍保留{context_note}"
         )
 
+    if show_stats:
+        output_fn(_format_stats(result))
+
     if result.stop_reason == COMPLETED_STOP_REASON:
         output_fn(f"停止原因: {result.stop_reason}")
         return 0
@@ -223,6 +233,36 @@ def _report_result(
     detail = f"：{error_text}" if error_text else ""
     error_fn(f"停止原因: {result.stop_reason}{detail}")
     return 130 if result.stop_reason == "interrupted" else 1
+
+
+def _format_stats(result: AgentRunResult) -> str:
+    """Render bounded, non-sensitive diagnostics for one task."""
+    stats = result.stats
+    fields = [
+        f"耗时: {stats.runtime_seconds:.3f} 秒",
+        f"Provider 请求: {stats.provider_attempts} 次",
+        f"工具调度: {stats.tool_dispatches} 次（工具错误: {stats.tool_errors} 次）",
+    ]
+    if stats.known_usage_requests:
+        usage = (
+            f"输入 Token: {stats.input_tokens}，输出 Token: {stats.output_tokens}，"
+            f"总计 Token: {stats.total_tokens}"
+        )
+        if stats.unknown_usage_requests:
+            usage += f"（另有 {stats.unknown_usage_requests} 次请求缺少 usage）"
+    elif stats.provider_attempts:
+        usage = f"Token 用量: 未知（{stats.provider_attempts} 次请求没有可用 usage）"
+    else:
+        usage = "Token 用量: 未知（没有发出 Provider 请求）"
+    fields.append(usage)
+    if stats.context_bytes is None or stats.context_max_bytes is None:
+        fields.append("上下文: 未知")
+    else:
+        fields.append(f"上下文: {stats.context_bytes}/{stats.context_max_bytes} 字节")
+    if stats.context_trimmed_tasks:
+        fields.append(f"省略历史任务: {stats.context_trimmed_tasks} 个")
+    fields.append(f"停止原因: {result.stop_reason or '未知'}")
+    return "运行统计: " + "；".join(fields)
 
 
 def _report_event(
@@ -332,6 +372,7 @@ def _run_chat(
     error_fn: Callable[[str], Any],
     *,
     new_session: Callable[[], AgentSession] | None = None,
+    show_stats: bool = False,
 ) -> int:
     """Read tasks until an explicit exit, EOF, interrupt, or abnormal result."""
     try:
@@ -374,7 +415,7 @@ def _run_chat(
                 continue
 
             result = session.run(task)
-            exit_code = _report_result(result, output_fn, error_fn)
+            exit_code = _report_result(result, output_fn, error_fn, show_stats=show_stats)
             if exit_code != 0:
                 return exit_code
     finally:
@@ -519,16 +560,18 @@ def main(
                     output_fn,
                     report_error,
                     new_session=create_session,
+                    show_stats=args.show_stats,
                 )
             return _run_chat(
                 AgentSession(loop),
                 input_fn,
                 output_fn,
                 report_error,
+                show_stats=args.show_stats,
             )
 
         result = loop.run(task)
-        return _report_result(result, output_fn, report_error)
+        return _report_result(result, output_fn, report_error, show_stats=args.show_stats)
     except KeyboardInterrupt:
         _report_interrupt(report_error)
         return 130

@@ -21,6 +21,7 @@ from coding_agent import (
     Message,
     ModelResponse,
     ToolCall,
+    Usage,
     Workspace,
     create_read_only_registry,
     create_workspace_registry,
@@ -833,6 +834,92 @@ def test_agent_loop_retries_transient_provider_error_within_budget(tmp_path: Pat
     assert result.state.step_count == 2
     assert len(provider.requests) == 2
     assert delays == [0.5]
+
+
+def test_agent_loop_collects_task_runtime_usage_and_tool_counts(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("Project contents", encoding="utf-8")
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(id="call_readme", name="read_file", arguments={"path": "README.md"})
+                ],
+                finish_reason="tool_calls",
+                usage=Usage(input_tokens=10, output_tokens=2, total_tokens=12),
+            ),
+            ModelResponse(
+                text="Done",
+                finish_reason="stop",
+                usage=Usage(input_tokens=20, output_tokens=4, total_tokens=24),
+            ),
+        ]
+    )
+
+    result = AgentLoop(provider, Workspace(tmp_path), max_steps=3).run("Read README.md")
+
+    assert result.stop_reason == "completed"
+    assert result.stats.provider_attempts == 2
+    assert result.stats.tool_dispatches == 1
+    assert result.stats.tool_errors == 0
+    assert result.stats.known_usage_requests == 2
+    assert result.stats.unknown_usage_requests == 0
+    assert result.stats.input_tokens == 30
+    assert result.stats.output_tokens == 6
+    assert result.stats.total_tokens == 36
+    assert result.stats.context_bytes is not None
+    assert result.stats.context_max_bytes == 262144
+    assert result.stats.runtime_seconds >= 0
+
+
+def test_agent_loop_marks_missing_usage_without_treating_it_as_zero(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [
+            ProviderNetworkError("temporary"),
+            ModelResponse(
+                text="Done",
+                finish_reason="stop",
+                usage=Usage(input_tokens=7, output_tokens=2, total_tokens=9),
+            ),
+        ]
+    )
+
+    result = AgentLoop(provider, Workspace(tmp_path), max_retries=1).run("Finish")
+
+    assert result.stop_reason == "completed"
+    assert result.stats.provider_attempts == 2
+    assert result.stats.known_usage_requests == 1
+    assert result.stats.unknown_usage_requests == 1
+    assert result.stats.input_tokens == 7
+    assert result.stats.known_input_tokens == 7
+
+
+def test_agent_loop_stats_record_context_rejection_without_provider_attempt(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    result = AgentLoop(provider, Workspace(tmp_path), max_context_bytes=1).run("A task")
+
+    assert result.stop_reason == CONTEXT_LIMIT_STOP_REASON
+    assert result.stats.provider_attempts == 0
+    assert result.stats.unknown_usage_requests == 0
+    assert result.stats.context_bytes is not None
+    assert result.stats.context_bytes > result.stats.context_max_bytes
+
+
+def test_agent_loop_stats_count_tool_errors_as_dispatches(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[ToolCall(id="call_missing", name="missing", arguments={})],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="The tool failed.", finish_reason="stop"),
+        ]
+    )
+
+    result = AgentLoop(provider, Workspace(tmp_path), max_steps=3).run("Use the tool")
+
+    assert result.stop_reason == "completed"
+    assert result.stats.tool_dispatches == 1
+    assert result.stats.tool_errors == 1
 
 
 def test_agent_loop_does_not_retry_past_max_steps(tmp_path: Path) -> None:

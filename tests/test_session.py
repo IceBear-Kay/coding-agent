@@ -13,6 +13,7 @@ from coding_agent import (
     Message,
     ModelResponse,
     ToolCall,
+    Usage,
     Workspace,
     create_read_only_registry,
     create_workspace_registry,
@@ -58,6 +59,31 @@ def test_session_preserves_completed_history_and_resets_task_state(tmp_path: Pat
     assert provider.requests[1][0][-1].content == "Second task"
     assert session.state.messages == second.state.messages
     assert session.state.messages is not second.state.messages
+
+
+def test_session_task_stats_are_reset_for_each_task(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                text="First answer",
+                finish_reason="stop",
+                usage=Usage(input_tokens=3, output_tokens=1, total_tokens=4),
+            ),
+            ModelResponse(
+                text="Second answer",
+                finish_reason="stop",
+                usage=Usage(input_tokens=5, output_tokens=2, total_tokens=7),
+            ),
+        ]
+    )
+    session = AgentSession(AgentLoop(provider, Workspace(tmp_path), max_steps=2))
+
+    first = session.run("First task")
+    second = session.run("Second task")
+
+    assert first.stats.provider_attempts == second.stats.provider_attempts == 1
+    assert first.stats.total_tokens == 4
+    assert second.stats.total_tokens == 7
 
 
 def test_session_preserves_tool_protocol_and_reasoning_across_tasks(tmp_path: Path) -> None:

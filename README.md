@@ -201,6 +201,7 @@ uv run coding-agent --help
 | `--allow-exec` / `--no-exec` | 默认开启 | 开放或关闭 `run_command`；每个命令仍需审批。 |
 | `--read-only` | 关闭 | 同时关闭写入和执行工具；不能与显式 `--allow-write` 或 `--allow-exec` 同时使用。 |
 | `--show-tool-events` / `--hide-tool-events` | 默认显示 | 控制正常工具过程提示；隐藏时审批、错误和最终回答仍显示。 |
+| `--show-stats` | 默认关闭 | 任务结束时显示本次运行的耗时、Provider 请求、工具调度、上下文和 Token 统计；不改变模型行为。 |
 | `--command-timeout` | `20.0` 秒 | 本地命令超时；必须是有限数值，且大于 0、不超过 60 秒。 |
 | `--command-output-limit` | `65536` 字节 | 本地命令 `stdout` 与 `stderr` 共享上限；范围为 1 至 1048576。 |
 | `--max-steps` | `8` | 每个任务的 Provider 调用次数上限，必须为正整数；临时错误重试也计入。不是工具调用次数上限。 |
@@ -209,6 +210,8 @@ uv run coding-agent --help
 | `--context-policy` | `stop` | 上下文超预算时的策略；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。 |
 
 `--max-steps` 统计模型请求次数；一次模型响应可以包含多个工具调用，这些调用按模型给出的顺序处理。在 `--chat` 模式中，每个新任务都会重新计算 `--max-steps` 和重试预算。写入和执行工具仍按调用逐次审批。`DEEPSEEK_TIMEOUT_SECONDS` 控制 API 网络请求，与 `--command-timeout` 控制的本地子进程超时无关。
+
+使用 `--show-stats` 可在每个任务结束时查看本次运行摘要。Provider 请求次数包含实际重试，工具调度次数包含拒绝、参数错误和执行失败；这些统计不等同于副作用成功次数。Token 只累加服务端返回的 `ModelResponse.usage`，没有 usage 的请求会单独标记为未知，不会按字节估算或显示为零。统计仅用于展示，不会写入消息历史或持久会话存档。
 
 `--max-context-bytes` 是软件级输入预算，按内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数统计。它不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证。预算超限时，默认 `--context-policy stop` 返回 `context_limit` 且不发送请求；显式使用 `--context-policy trim` 时，才会按完整旧任务从最早开始裁剪，仍无法满足预算则返回 `context_limit`。两种策略都不会摘要或重试该请求。在 `--chat` 中，正常完成任务的历史会继续计入预算；`/clear` 后只计算新历史。
 

@@ -47,6 +47,58 @@ class Message(BaseModel):
         return self
 
 
+class TaskStats(BaseModel):
+    """Non-authoritative diagnostics collected for one task run."""
+
+    provider_attempts: int = Field(default=0, ge=0)
+    tool_dispatches: int = Field(default=0, ge=0)
+    tool_errors: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    known_usage_requests: int = Field(default=0, ge=0)
+    unknown_usage_requests: int = Field(default=0, ge=0)
+    context_bytes: int | None = Field(default=None, ge=0)
+    context_max_bytes: int | None = Field(default=None, ge=1)
+    context_trimmed_tasks: int = Field(default=0, ge=0)
+    runtime_seconds: float = Field(default=0.0, ge=0.0)
+
+    @property
+    def usage_complete(self) -> bool:
+        """Whether every provider attempt returned a usable usage block."""
+        return self.provider_attempts > 0 and self.unknown_usage_requests == 0
+
+    @property
+    def known_input_tokens(self) -> int | None:
+        return self.input_tokens if self.known_usage_requests else None
+
+    @property
+    def known_output_tokens(self) -> int | None:
+        return self.output_tokens if self.known_usage_requests else None
+
+    @property
+    def known_total_tokens(self) -> int | None:
+        return self.total_tokens if self.known_usage_requests else None
+
+    @property
+    def model_requests(self) -> int:
+        """Compatibility alias for the number of provider attempts."""
+        return self.provider_attempts
+
+    @property
+    def tool_calls(self) -> int:
+        """Compatibility alias for dispatcher entries."""
+        return self.tool_dispatches
+
+    @property
+    def missing_usage_requests(self) -> int:
+        return self.unknown_usage_requests
+
+    @property
+    def duration_seconds(self) -> float:
+        return self.runtime_seconds
+
+
 class AgentState(BaseModel):
     """Mutable state carried across steps of an agent run."""
 
@@ -56,6 +108,7 @@ class AgentState(BaseModel):
     step_count: int = Field(default=0, ge=0)
     # Count historical task groups omitted from provider request contexts.
     context_trimmed_tasks: int = Field(default=0, ge=0)
+    stats: TaskStats = Field(default_factory=TaskStats)
     stop_reason: str | None = Field(default=None, min_length=1)
 
 
