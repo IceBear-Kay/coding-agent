@@ -20,6 +20,7 @@ from coding_agent.tools import (
     ToolRegistry,
     ToolSpec,
     Workspace,
+    WorkspacePathError,
     create_read_only_registry,
 )
 
@@ -222,6 +223,10 @@ class _WriteFileHandler:
     def _prepare(self, arguments: WriteFileArguments) -> _WritePlan:
         relative_path, parts = _normalize_write_path(arguments.path)
         target = self._workspace.root.joinpath(*parts)
+        try:
+            self._workspace.ensure_path_accessible(target)
+        except WorkspacePathError as exc:
+            raise _UnsafeWritePathError(str(exc)) from exc
         missing_parents, existing_parents = _inspect_parent_path(
             self._workspace.root,
             parts,
@@ -684,11 +689,15 @@ def _load_edit_source(
     max_content_bytes: int,
 ) -> _EditSource:
     relative_path, parts = _normalize_write_path(path)
+    target = workspace.root.joinpath(*parts)
+    try:
+        workspace.ensure_path_accessible(target)
+    except WorkspacePathError as exc:
+        raise _UnsafeWritePathError(str(exc)) from exc
     missing_parents, parents = _inspect_parent_path(workspace.root, parts)
     if missing_parents:
         raise _TargetNotFoundError(relative_path)
 
-    target = workspace.root.joinpath(*parts)
     before_stat = _lstat(target)
     if before_stat is None:
         raise _TargetNotFoundError(relative_path)

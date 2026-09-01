@@ -3,7 +3,7 @@
 import codecs
 import json
 import os
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
@@ -106,7 +106,12 @@ class _ScanBudget:
 class Workspace:
     """Resolve paths while keeping all access inside one workspace root."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        protected_paths: Sequence[str | Path] = (),
+    ) -> None:
         try:
             resolved_root = Path(root).expanduser().resolve(strict=True)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -115,6 +120,37 @@ class Workspace:
         if not resolved_root.is_dir():
             raise ValueError("Workspace root must be an existing directory")
         self.root = resolved_root
+        self._protected_paths: set[Path] = set()
+        for protected_path in protected_paths:
+            self.protect_path(protected_path)
+
+    def protect_path(self, path: str | Path) -> None:
+        """Protect one workspace subtree from direct agent file-tool access."""
+        candidate = Path(path).expanduser().resolve(strict=False)
+        try:
+            candidate.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError("Protected path must be inside the workspace root") from exc
+        self._protected_paths.add(candidate)
+
+    def is_protected_path(self, path: str | Path) -> bool:
+        """Return whether a path is inside a registered protected subtree."""
+        candidate = Path(path).expanduser().resolve(strict=False)
+        return any(
+            candidate == protected or protected in candidate.parents
+            for protected in self._protected_paths
+        )
+
+    def ensure_path_accessible(self, path: str | Path) -> Path:
+        """Resolve a path and reject protected subtrees."""
+        candidate = Path(path).expanduser().resolve(strict=False)
+        try:
+            candidate.relative_to(self.root)
+        except ValueError as exc:
+            raise WorkspacePathError("Workspace path escapes the workspace root") from exc
+        if self.is_protected_path(candidate):
+            raise WorkspacePathError("Workspace path is protected from agent file tools")
+        return candidate
 
     def resolve_path(self, path: str | Path) -> Path:
         """Resolve a relative path and reject escapes, including symlinks."""
@@ -139,6 +175,8 @@ class Workspace:
             resolved.relative_to(self.root)
         except (OSError, RuntimeError, ValueError) as exc:
             raise WorkspacePathError("Workspace path escapes the workspace root") from exc
+        if self.is_protected_path(resolved):
+            raise WorkspacePathError("Workspace path is protected from agent file tools")
         return resolved
 
     def list_files(
@@ -203,6 +241,8 @@ class Workspace:
             entry = current_entries[index]
             stack[-1] = (current_entries, index + 1, current_truncated)
             entry_path = Path(entry.path)
+            if self.is_protected_path(entry_path):
+                continue
             if entry.name.casefold() in IGNORED_DIRECTORY_NAMES:
                 continue
 

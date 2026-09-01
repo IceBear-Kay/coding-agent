@@ -10,6 +10,7 @@
 CLI
   -> Agent Loop
        -> AgentState / Context Policy
+       -> AgentSession / SessionStore
        -> ModelProvider
        -> Tool Registry / Dispatcher
             -> Workspace Files
@@ -22,6 +23,7 @@ CLI
 - **ModelProvider**：屏蔽模型厂商差异，输出统一 `ModelResponse`。
 - **Tool Registry/Dispatcher**：暴露工具 Schema、验证参数并调度本地实现。
 - **Context Policy**：按 UTF-8 字节预算检查请求上下文；默认 `stop` 在超限时停止，显式 `trim` 时按完整旧任务从最早开始裁剪，当前不提供摘要压缩。
+- **AgentSession / SessionStore**：在聊天任务正常完成后提交完整历史；可选 JSON 存档支持跨进程恢复，使用会话生命周期独占锁、原子写入并校验工作区和历史结构。
 
 CLI 通过轻量执行事件显示实际的工具调用和结构化结果摘要，包括文件相对路径、命令
 退出状态、超时或截断信息；它不展示认证信息、完整 API 请求或模型的
@@ -62,7 +64,8 @@ Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数�
 - M1：治理规范、Python/uv 骨架和 CI。
 - M2：DeepSeek Provider、只读工具、Agent Loop 和 CLI。
 - M3：经审批的写文件、精确编辑、本地命令执行和端到端编程任务。
-- 后续：会话持久化、上下文压缩和更强的执行隔离。
+- M5-B：完成聊天会话持久化与恢复、存档边界保护和会话级测试。
+- 后续：上下文压缩和更强的执行隔离。
 
 只读 M2 用于尽早验证完整数据流，但最终 Coding Agent 必须具备本地写入、修改和命令执行能力。
 
@@ -75,7 +78,7 @@ Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数�
 - CLI 的 `run_command` 默认超时为 20 秒，可用参数覆盖；正常工具调用和结果摘要默认显示，也可单独隐藏而不改变内部事件或消息历史。
 - Agent Loop 会保留完整对话历史、Assistant Tool Calls、`reasoning_content` 和原始 `tool_call_id`，并区分正常完成、`max_steps`、`interrupted`、Provider 错误及非正常 `finish_reason`。
 - 端到端离线测试使用 `FakeProvider` 驱动真实文件和受控本地进程，覆盖读取题目、批准写入、运行失败、精确编辑、再次运行成功以及拒绝和超时路径；OpenAI-compatible 协议使用 `httpx.MockTransport` 验证，不调用真实模型。
-- 当前不删除文件，不提供自动审批、持久化会话或上下文压缩。本地命令以当前用户权限运行；路径检查、最小环境、资源预算和审批不等同于操作系统沙箱。
+- 当前不删除文件，不提供自动审批、上下文摘要压缩或中断续跑。持久聊天可保存和恢复正常完成任务的完整历史，但不保存 Provider 配置、环境变量、API Key、审批状态或进程对象；本地命令以当前用户权限运行，路径检查、最小环境、资源预算和审批不等同于操作系统沙箱。
 
 ## Safety
 

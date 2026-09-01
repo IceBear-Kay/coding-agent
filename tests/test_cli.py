@@ -1,15 +1,18 @@
 import json
+import subprocess
 import sys
 from io import StringIO
 from pathlib import Path
 
 import pytest
 
+from coding_agent import session_store as session_store_module
 from coding_agent.agent import DEFAULT_SYSTEM_PROMPT
 from coding_agent.cli import build_parser, main
 from coding_agent.context import measure_context_bytes
 from coding_agent.models import Message, ModelResponse, ToolCall
 from coding_agent.provider import FakeProvider
+from coding_agent.session_store import SessionStore, SessionStoreError
 from coding_agent.tools import Workspace, create_read_only_registry
 
 
@@ -47,6 +50,438 @@ def test_cli_parser_accepts_chat_mode() -> None:
 
     assert args.chat is True
     assert args.task is None
+
+
+def test_cli_parser_accepts_persistent_session_options() -> None:
+    args = build_parser().parse_args(["--chat", "--session", "chat_1", "--session-dir", "sessions"])
+
+    assert args.chat is True
+    assert args.session == "chat_1"
+    assert args.resume is None
+    assert args.session_dir == "sessions"
+
+    resumed = build_parser().parse_args(["--chat", "--resume", "chat_1"])
+    assert resumed.resume == "chat_1"
+
+
+@pytest.mark.parametrize(
+    "argv, message",
+    [
+        (["--session", "chat_1", "任务"], "错误: 持久会话不能与位置任务同时使用"),
+        (
+            ["--no-chat", "--session", "chat_1"],
+            "错误: --session 或 --resume 只能与 --chat 一起使用",
+        ),
+        (
+            ["--session-dir", "sessions"],
+            "错误: --session-dir 必须与 --session 或 --resume 一起使用",
+        ),
+    ],
+)
+def test_cli_rejects_invalid_persistence_combinations(
+    tmp_path: Path, argv: list[str], message: str
+) -> None:
+    errors: list[str] = []
+    exit_code = main(
+        [*argv, "--workspace", str(tmp_path)],
+        provider=FakeProvider([]),
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 2
+    assert errors == [message]
+
+
+def test_cli_persistent_session_creates_archive_and_saves_completed_tasks(tmp_path: Path) -> None:
+    store_root = tmp_path / "archives"
+    provider = FakeProvider(
+        [
+            ModelResponse(text="第一项完成", finish_reason="stop"),
+            ModelResponse(text="第二项完成", finish_reason="stop"),
+        ]
+    )
+    inputs = iter(["第一项任务", "第二项任务", "/exit"])
+    output: list[str] = []
+
+    exit_code = main(
+        [
+            "--chat",
+            "--session",
+            "chat_1",
+            "--session-dir",
+            str(store_root),
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+        ],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert output[0].startswith("持久会话 ID: chat_1\n存档路径:")
+    archive = json.loads((store_root / "chat_1.json").read_text(encoding="utf-8"))
+    assert [message["role"] for message in archive["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+        "assistant",
+    ]
+    assert [message["content"] for message in archive["messages"] if message["role"] == "user"] == [
+        "第一项任务",
+        "第二项任务",
+    ]
+
+
+def test_cli_persistent_resume_does_not_replay_provider_or_tools(tmp_path: Path) -> None:
+    store_root = tmp_path / "archives"
+    first_inputs = iter(["保存历史", "/exit"])
+    first_provider = FakeProvider([ModelResponse(text="已保存", finish_reason="stop")])
+    assert (
+        main(
+            [
+                "--chat",
+                "--session",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+                "--read-only",
+            ],
+            provider=first_provider,
+            input_fn=lambda _: next(first_inputs),
+        )
+        == 0
+    )
+
+    resumed_provider = FakeProvider([])
+    output: list[str] = []
+    exit_code = main(
+        [
+            "--chat",
+            "--resume",
+            "chat_1",
+            "--session-dir",
+            str(store_root),
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+        ],
+        provider=resumed_provider,
+        input_fn=lambda _: "/exit",
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    assert resumed_provider.requests == []
+    assert output[0].startswith("持久会话 ID: chat_1\n存档路径:")
+    assert "保存历史" not in output[0]
+
+
+def test_cli_resume_adds_stale_history_rule_to_provider_system_prompt(tmp_path: Path) -> None:
+    store_root = tmp_path / "archives"
+    first_inputs = iter(["保存历史", "/exit"])
+    assert (
+        main(
+            [
+                "--chat",
+                "--session",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+                "--read-only",
+            ],
+            provider=FakeProvider([ModelResponse(text="已保存", finish_reason="stop")]),
+            input_fn=lambda _: next(first_inputs),
+        )
+        == 0
+    )
+
+    provider = FakeProvider([ModelResponse(text="已继续", finish_reason="stop")])
+    inputs = iter(["继续任务", "/exit"])
+    output: list[str] = []
+    assert (
+        main(
+            [
+                "--chat",
+                "--resume",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+                "--read-only",
+            ],
+            provider=provider,
+            input_fn=lambda _: next(inputs),
+            output_fn=output.append,
+        )
+        == 0
+    )
+
+    system = provider.requests[0][0][0]
+    assert system.role == "system"
+    assert system.content is not None
+    assert system.content.count("历史工具结果可能已过时") == 1
+    assert sum(message.role == "system" for message in provider.requests[0][0]) == 1
+
+
+def test_cli_archive_io_failure_reports_save_error_and_keeps_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_root = tmp_path / "archives"
+    calls = 0
+    real_fsync = session_store_module.os.fsync
+
+    def fail_during_save(descriptor: int) -> None:
+        nonlocal calls
+        calls += 1
+        if calls > 3:
+            raise OSError("simulated archive fsync failure")
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(session_store_module.os, "fsync", fail_during_save)
+    output: list[str] = []
+    errors: list[str] = []
+    exit_code = main(
+        [
+            "--chat",
+            "--session",
+            "chat_1",
+            "--session-dir",
+            str(store_root),
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+        ],
+        provider=FakeProvider([ModelResponse(text="真实答案", finish_reason="stop")]),
+        input_fn=lambda _: "完成任务",
+        output_fn=output.append,
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 1
+    assert "真实答案" in output
+    assert errors and errors[0].startswith("停止原因: session_save_error")
+    archive = json.loads((store_root / "chat_1.json").read_text(encoding="utf-8"))
+    assert archive["messages"] == []
+
+
+def test_cli_rejects_cross_process_session_occupancy_before_provider_or_tools(
+    tmp_path: Path,
+) -> None:
+    store_root = tmp_path / "archives"
+    SessionStore(store_root).create("chat_1", tmp_path)
+    child_code = (
+        "import sys,time; "
+        "from coding_agent.session_store import SessionStore; "
+        "lease=SessionStore(sys.argv[1]).acquire('chat_1'); "
+        "print('ready', flush=True); time.sleep(30)"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", child_code, str(store_root)],
+        cwd=Path(__file__).resolve().parents[1],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        assert process.stdout.readline().strip() == "ready"
+        provider = FakeProvider([])
+        errors: list[str] = []
+        exit_code = main(
+            [
+                "--chat",
+                "--resume",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+                "--read-only",
+            ],
+            provider=provider,
+            error_fn=errors.append,
+        )
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+    assert exit_code == 2
+    assert provider.requests == []
+    assert errors == ["错误: session is already in use"]
+    assert not (tmp_path / "unexpected.txt").exists()
+
+
+def test_cli_persistent_clear_keeps_old_archive_and_switches_id(tmp_path: Path) -> None:
+    store_root = tmp_path / "archives"
+    provider = FakeProvider(
+        [
+            ModelResponse(text="旧回答", finish_reason="stop"),
+            ModelResponse(text="新回答", finish_reason="stop"),
+        ]
+    )
+    inputs = iter(["旧任务", "/clear", "新任务", "/exit"])
+    output: list[str] = []
+
+    exit_code = main(
+        [
+            "--chat",
+            "--session",
+            "chat_old",
+            "--session-dir",
+            str(store_root),
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+        ],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    archives = sorted(store_root.glob("*.json"))
+    assert {path.stem for path in archives} >= {"chat_old"}
+    assert len(archives) == 2
+    old = json.loads((store_root / "chat_old.json").read_text(encoding="utf-8"))
+    new_path = next(path for path in archives if path.stem != "chat_old")
+    new = json.loads(new_path.read_text(encoding="utf-8"))
+    assert "旧任务" in [message.get("content") for message in old["messages"]]
+    assert "新任务" in [message.get("content") for message in new["messages"]]
+    assert "旧任务" not in [message.get("content") for message in new["messages"]]
+    assert any("已切换到新持久会话" in message for message in output)
+
+
+def test_cli_persistent_clear_failure_keeps_current_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_root = tmp_path / "archives"
+    provider = FakeProvider([ModelResponse(text="旧回答", finish_reason="stop")])
+    inputs = iter(["旧任务", "/clear", "/exit"])
+    errors: list[str] = []
+
+    class FixedUuid:
+        hex = "chat_old"
+
+    monkeypatch.setattr("coding_agent.cli.uuid.uuid4", lambda: FixedUuid())
+    exit_code = main(
+        [
+            "--chat",
+            "--session",
+            "chat_old",
+            "--session-dir",
+            str(store_root),
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+        ],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 0
+    assert errors and errors[0].startswith("错误: 无法切换持久会话：")
+    assert sorted(path.name for path in store_root.glob("*.json")) == ["chat_old.json"]
+
+
+def test_cli_clear_release_failure_stops_without_follow_up_model_or_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store_root = tmp_path / "archives"
+    original_acquire = SessionStore.acquire
+    leases = []
+
+    def capture_acquire(store: SessionStore, session_id: str):
+        lease = original_acquire(store, session_id)
+        leases.append(lease)
+        if len(leases) == 2:
+            original_release = lease.release
+            failed = False
+
+            def fail_once() -> None:
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise SessionStoreError("simulated old lock release failure")
+                original_release()
+
+            lease.release = fail_once  # type: ignore[method-assign]
+        return lease
+
+    monkeypatch.setattr(SessionStore, "acquire", capture_acquire)
+    provider = FakeProvider([ModelResponse(text="旧回答", finish_reason="stop")])
+    inputs = iter(["旧任务", "/clear", "不应执行"])
+    errors: list[str] = []
+    exit_code = main(
+        [
+            "--chat",
+            "--session",
+            "chat_old",
+            "--session-dir",
+            str(store_root),
+            "--workspace",
+            str(tmp_path),
+            "--read-only",
+        ],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        error_fn=errors.append,
+    )
+
+    assert exit_code == 2
+    assert len(provider.requests) == 1
+    assert errors and any("旧持久会话锁未能释放" in message for message in errors)
+    assert not (tmp_path / "unexpected.txt").exists()
+
+
+def test_cli_startup_output_failure_releases_session_lock(
+    tmp_path: Path,
+) -> None:
+    store_root = tmp_path / "archives"
+
+    def fail_output(_: str) -> None:
+        raise RuntimeError("simulated output failure")
+
+    with pytest.raises(RuntimeError, match="simulated output failure"):
+        main(
+            [
+                "--chat",
+                "--session",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+                "--read-only",
+            ],
+            provider=FakeProvider([]),
+            output_fn=fail_output,
+        )
+
+    lease = SessionStore(store_root).acquire("chat_1")
+    lease.release()
+
+
+def test_cli_memory_chat_does_not_create_session_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    inputs = iter(["普通聊天", "/exit"])
+    exit_code = main(
+        ["--chat", "--workspace", str(tmp_path), "--read-only"],
+        provider=FakeProvider([ModelResponse(text="完成", finish_reason="stop")]),
+        input_fn=lambda _: next(inputs),
+    )
+
+    assert exit_code == 0
+    assert not (tmp_path / ".local" / "sessions").exists()
 
 
 def test_cli_parser_preserves_unspecified_defaults_for_mode_and_permissions() -> None:
