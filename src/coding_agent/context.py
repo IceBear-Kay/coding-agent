@@ -258,6 +258,32 @@ def check_context_budget(
     return ContextBudget(max_bytes=max_context_bytes).check(messages, tools)
 
 
+def validate_completed_history(messages: Sequence[Message]) -> None:
+    """Validate that a history contains only complete, well-formed task exchanges."""
+    if not messages:
+        return
+
+    task_start: int | None = None
+    saw_user_task = False
+    for index, message in enumerate(messages):
+        if message.role == "system":
+            if task_start is not None:
+                raise ContextHistoryError
+            continue
+        if message.role == "user":
+            saw_user_task = True
+            if task_start is not None:
+                _validate_task(messages, task_start, index, require_completion=True)
+            task_start = index
+            continue
+        if task_start is None:
+            raise ContextHistoryError
+
+    if task_start is None or not saw_user_task:
+        raise ContextHistoryError
+    _validate_task(messages, task_start, len(messages), require_completion=True)
+
+
 __all__ = [
     "DEFAULT_MAX_CONTEXT_BYTES",
     "ContextBudget",
@@ -271,4 +297,5 @@ __all__ = [
     "measure_context_bytes",
     "select_context",
     "serialize_context",
+    "validate_completed_history",
 ]

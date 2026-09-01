@@ -1,15 +1,74 @@
 """In-memory session coordination for consecutive completed tasks."""
 
+import os
+from contextlib import suppress
+from pathlib import Path
+
 from coding_agent.agent import COMPLETED_STOP_REASON, AgentLoop, AgentRunResult
 from coding_agent.models import Message, SessionState
+from coding_agent.session_store import (
+    SessionArchive,
+    SessionStore,
+    SessionStoreError,
+)
+
+SESSION_SAVE_ERROR_STOP_REASON = "session_save_error"
 
 
 class AgentSession:
     """Keep one authoritative history while each task gets a fresh AgentState."""
 
-    def __init__(self, loop: AgentLoop) -> None:
+    def __init__(
+        self,
+        loop: AgentLoop,
+        *,
+        store: SessionStore | None = None,
+        archive: SessionArchive | None = None,
+    ) -> None:
+        if (store is None) != (archive is None):
+            raise ValueError("store and archive must be provided together")
         self.loop = loop
-        self.state = SessionState()
+        self.store = store
+        self._archive = archive
+        if archive is not None:
+            if os.path.normcase(archive.workspace_root) != os.path.normcase(
+                str(loop.workspace.root)
+            ):
+                raise ValueError("session workspace does not match loop workspace")
+            with suppress(ValueError):
+                loop.workspace.protect_path(store.root)  # type: ignore[union-attr]
+        restored_messages = []
+        if archive is not None:
+            restored_messages = [
+                message.model_copy(deep=True)
+                for message in archive.messages
+                if self.loop.system_prompt is None or message.role != "system"
+            ]
+        self.state = SessionState(messages=restored_messages)
+
+    @classmethod
+    def create(cls, loop: AgentLoop, store: SessionStore, session_id: str) -> "AgentSession":
+        """Create an empty persisted session without calling the provider."""
+        archive = store.create(session_id, loop.workspace.root)
+        return cls(loop, store=store, archive=archive)
+
+    @classmethod
+    def resume(cls, loop: AgentLoop, store: SessionStore, session_id: str) -> "AgentSession":
+        """Load completed history without replaying model or tool calls."""
+        archive = store.load(session_id, workspace_root=loop.workspace.root)
+        return cls(loop, store=store, archive=archive)
+
+    @property
+    def session_id(self) -> str | None:
+        """Return the persistent session ID, or ``None`` for memory-only sessions."""
+        return self._archive.session_id if self._archive is not None else None
+
+    @property
+    def archive_path(self) -> Path | None:
+        """Return the persistent archive path when persistence is enabled."""
+        return (
+            self.store.path_for(self._archive.session_id) if self.store and self._archive else None
+        )
 
     @property
     def messages(self) -> list[Message]:
@@ -20,9 +79,24 @@ class AgentSession:
         """Run a task and commit its complete history only after normal completion."""
         result = self.loop.run(task, history=self.state.messages)
         if result.stop_reason == COMPLETED_STOP_REASON:
-            self.state.messages = [
+            committed_messages = [
                 message.model_copy(deep=True) for message in result.state.messages
             ]
+            self.state.messages = committed_messages
+            if self.store is not None and self._archive is not None:
+                candidate = self._archive.model_copy(
+                    update={"messages": committed_messages},
+                    deep=True,
+                )
+                try:
+                    self._archive = self.store.save(candidate)
+                except SessionStoreError as exc:
+                    result.state.stop_reason = SESSION_SAVE_ERROR_STOP_REASON
+                    return AgentRunResult(
+                        answer=result.answer,
+                        state=result.state,
+                        error=exc,
+                    )
         return result
 
     def clear(self) -> None:
@@ -30,4 +104,4 @@ class AgentSession:
         self.state.messages.clear()
 
 
-__all__ = ["AgentSession"]
+__all__ = ["AgentSession", "SESSION_SAVE_ERROR_STOP_REASON"]

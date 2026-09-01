@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from coding_agent import (
     AgentLoop,
@@ -20,6 +21,8 @@ from coding_agent import (
 from coding_agent.config import ProviderConfig
 from coding_agent.errors import ProviderNetworkError
 from coding_agent.provider import OpenAICompatibleProvider
+from coding_agent.session import SESSION_SAVE_ERROR_STOP_REASON
+from coding_agent.session_store import SessionStore, SessionStoreError
 
 
 def test_session_preserves_completed_history_and_resets_task_state(tmp_path: Path) -> None:
@@ -481,6 +484,170 @@ def test_session_provider_error_ends_task_without_committing_history(tmp_path: P
     assert result.error is provider_error
     assert session.messages == []
     assert len(error_provider.requests) == 1
+
+
+def test_persistent_session_saves_only_completed_tasks(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    provider = FakeProvider(
+        [
+            ModelResponse(text="first answer", finish_reason="stop"),
+            ModelResponse(
+                text=None,
+                reasoning_content="truncated",
+                finish_reason="length",
+            ),
+        ]
+    )
+    session = AgentSession.create(AgentLoop(provider, Workspace(tmp_path)), store, "chat_1")
+
+    completed = session.run("first task")
+    archive_after_completed = store.load("chat_1", workspace_root=tmp_path)
+    stopped = session.run("second task")
+
+    assert completed.stop_reason == "completed"
+    assert completed.error is None
+    assert stopped.stop_reason == "length"
+    assert archive_after_completed.messages == session.messages
+    assert store.load("chat_1", workspace_root=tmp_path) == archive_after_completed
+    assert Message(role="user", content="second task") in stopped.state.messages
+    assert Message(role="user", content="second task") not in archive_after_completed.messages
+
+
+def test_persistent_session_resume_does_not_replay_history(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    workspace = Workspace(tmp_path)
+    registry = create_workspace_registry(
+        workspace,
+        allow_write=True,
+        approval_callback=lambda _: True,
+    )
+    first_provider = FakeProvider(
+        [
+            ModelResponse(
+                tool_calls=[
+                    ToolCall(
+                        id="call_create",
+                        name="write_file",
+                        arguments={"path": "note.txt", "content": "saved"},
+                    )
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="created", finish_reason="stop"),
+        ]
+    )
+    first_session = AgentSession.create(
+        AgentLoop(first_provider, workspace, registry=registry),
+        store,
+        "chat_1",
+    )
+    assert first_session.run("create note").stop_reason == "completed"
+
+    second_provider = FakeProvider([ModelResponse(text="continued", finish_reason="stop")])
+    resumed = AgentSession.resume(
+        AgentLoop(
+            second_provider, Workspace(tmp_path), registry=create_read_only_registry(workspace)
+        ),
+        store,
+        "chat_1",
+    )
+
+    assert second_provider.requests == []
+    continued = resumed.run("what was created?")
+
+    assert continued.stop_reason == "completed"
+    assert len(second_provider.requests) == 1
+    request_messages = second_provider.requests[0][0]
+    assert any(message.tool_call_id == "call_create" for message in request_messages)
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "saved"
+
+
+def test_persistent_resume_rebuilds_system_prompt_for_current_run(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    first_provider = FakeProvider([ModelResponse(text="old answer", finish_reason="stop")])
+    first = AgentSession.create(
+        AgentLoop(first_provider, Workspace(tmp_path), system_prompt="old rules"),
+        store,
+        "chat_1",
+    )
+    assert first.run("first task").stop_reason == "completed"
+
+    second_provider = FakeProvider([ModelResponse(text="new answer", finish_reason="stop")])
+    resumed = AgentSession.resume(
+        AgentLoop(second_provider, Workspace(tmp_path), system_prompt="new rules"),
+        store,
+        "chat_1",
+    )
+
+    result = resumed.run("second task")
+
+    assert result.stop_reason == "completed"
+    request_messages = second_provider.requests[0][0]
+    assert request_messages[0] == Message(role="system", content="new rules")
+    assert sum(message.role == "system" for message in request_messages) == 1
+    assert request_messages[-1] == Message(role="user", content="second task")
+
+
+def test_persistent_session_save_failure_keeps_real_result_and_old_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    session = AgentSession.create(
+        AgentLoop(
+            FakeProvider([ModelResponse(text="answer", finish_reason="stop")]),
+            Workspace(tmp_path),
+        ),
+        store,
+        "chat_1",
+    )
+    original = store.load("chat_1", workspace_root=tmp_path)
+
+    def fail_save(*args, **kwargs):
+        raise SessionStoreError("simulated save failure")
+
+    monkeypatch.setattr(store, "save", fail_save)
+    result = session.run("task with real result")
+
+    assert result.stop_reason == SESSION_SAVE_ERROR_STOP_REASON
+    assert isinstance(result.error, SessionStoreError)
+    assert result.answer == "answer"
+    assert Message(role="user", content="task with real result") in session.messages
+    assert store.load("chat_1", workspace_root=tmp_path) == original
+
+
+def test_persistent_session_store_directory_is_protected_from_file_tools(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    workspace = Workspace(tmp_path)
+    loop = AgentLoop(
+        FakeProvider([]),
+        workspace,
+        registry=create_workspace_registry(
+            workspace,
+            allow_write=True,
+            approval_callback=lambda _: True,
+        ),
+    )
+    session = AgentSession.create(loop, store, "chat_1")
+
+    read_result = session.loop.dispatcher.dispatch(
+        ToolCall(id="read", name="read_file", arguments={"path": "sessions/chat_1.json"})
+    )
+    list_result = session.loop.dispatcher.dispatch(
+        ToolCall(id="list", name="list_files", arguments={"path": "."})
+    )
+    write_result = session.loop.dispatcher.dispatch(
+        ToolCall(
+            id="write",
+            name="write_file",
+            arguments={"path": "sessions/new.json", "content": "blocked"},
+        )
+    )
+
+    assert read_result.is_error is True
+    assert "protected" in read_result.content.lower()
+    assert "sessions/chat_1.json" not in list_result.content
+    assert write_result.is_error is True
+    assert not (tmp_path / "sessions" / "new.json").exists()
 
 
 def test_session_interrupt_after_first_of_multiple_tools_keeps_completed_result(

@@ -3,8 +3,10 @@
 import argparse
 import json
 import sys
+import uuid
 from collections.abc import Callable, Sequence
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from coding_agent.agent import (
@@ -28,6 +30,7 @@ from coding_agent.file_tools import create_workspace_registry
 from coding_agent.models import ToolResult
 from coding_agent.provider import ModelProvider, OpenAICompatibleProvider
 from coding_agent.session import AgentSession
+from coding_agent.session_store import SessionStore, SessionStoreError
 from coding_agent.tools import Workspace
 
 _STRUCTURED_RESULT_TOOLS = frozenset({"write_file", "edit_file", "run_command"})
@@ -67,6 +70,22 @@ def build_parser() -> argparse.ArgumentParser:
         dest="chat",
         action="store_false",
         help="关闭连续任务会话；省略位置任务时只读取一次输入。",
+    )
+    session_group = parser.add_mutually_exclusive_group()
+    session_group.add_argument(
+        "--session",
+        metavar="ID",
+        help="创建指定 ID 的持久聊天会话；只能与 --chat 一起使用。",
+    )
+    session_group.add_argument(
+        "--resume",
+        metavar="ID",
+        help="恢复指定 ID 的持久聊天会话；只能与 --chat 一起使用。",
+    )
+    parser.add_argument(
+        "--session-dir",
+        metavar="PATH",
+        help="持久会话存档目录（默认：启动目录下 .local/sessions）。",
     )
     parser.add_argument(
         "--workspace",
@@ -311,6 +330,8 @@ def _run_chat(
     input_fn: Callable[[str], str],
     output_fn: Callable[[str], Any],
     error_fn: Callable[[str], Any],
+    *,
+    new_session: Callable[[], AgentSession] | None = None,
 ) -> int:
     """Read tasks until an explicit exit, EOF, interrupt, or abnormal result."""
     while True:
@@ -323,8 +344,21 @@ def _run_chat(
         if task == "/exit":
             return 0
         if task == "/clear":
-            session.clear()
-            output_fn("会话历史已清空")
+            if new_session is None:
+                session.clear()
+                output_fn("会话历史已清空")
+            else:
+                try:
+                    replacement = new_session()
+                except SessionStoreError as exc:
+                    error_fn(f"错误: 无法切换持久会话：{exc}")
+                    continue
+                session = replacement
+                output_fn(
+                    "会话历史已清空，已切换到新持久会话\n"
+                    f"会话 ID: {session.session_id}\n"
+                    f"存档路径: {session.archive_path}"
+                )
             continue
         if not task:
             continue
@@ -356,11 +390,22 @@ def main(
             report_error("错误: --chat 不能与位置任务同时使用")
             return 2
 
+        persistent_requested = args.session is not None or args.resume is not None
+        if persistent_requested and args.task is not None:
+            report_error("错误: 持久会话不能与位置任务同时使用")
+            return 2
+
         if args.read_only and (args.allow_write is True or args.allow_exec is True):
             report_error("错误: --read-only 不能与 --allow-write 或 --allow-exec 同时使用")
             return 2
 
         effective_chat = args.chat if args.chat is not None else args.task is None
+        if persistent_requested and not effective_chat:
+            report_error("错误: --session 或 --resume 只能与 --chat 一起使用")
+            return 2
+        if args.session_dir is not None and not persistent_requested:
+            report_error("错误: --session-dir 必须与 --session 或 --resume 一起使用")
+            return 2
         effective_allow_write = (
             False if args.read_only else True if args.allow_write is None else args.allow_write
         )
@@ -417,6 +462,31 @@ def main(
             ),
         )
         if effective_chat:
+            if persistent_requested:
+                store_root = (
+                    Path(args.session_dir)
+                    if args.session_dir is not None
+                    else Path.cwd() / ".local" / "sessions"
+                )
+                store = SessionStore(store_root)
+                if args.session is not None:
+                    session = AgentSession.create(loop, store, args.session)
+                else:
+                    session = AgentSession.resume(loop, store, args.resume)
+                output_fn(f"持久会话 ID: {session.session_id}\n存档路径: {session.archive_path}")
+                if args.resume is not None:
+                    output_fn("提示：历史工具结果可能过时，请重新读取并核验当前文件。")
+
+                def create_session() -> AgentSession:
+                    return AgentSession.create(loop, store, uuid.uuid4().hex)
+
+                return _run_chat(
+                    session,
+                    input_fn,
+                    output_fn,
+                    report_error,
+                    new_session=create_session,
+                )
             return _run_chat(
                 AgentSession(loop),
                 input_fn,
@@ -432,7 +502,7 @@ def main(
     except EOFError:
         report_error("错误: 无法读取 task")
         return 2
-    except (ProviderError, OSError, ValueError) as exc:
+    except (ProviderError, SessionStoreError, OSError, ValueError) as exc:
         report_error(f"错误: {exc}")
         return 2
 

@@ -39,6 +39,7 @@ from coding_agent.context import (
     measure_context_bytes,
     select_context,
     serialize_context,
+    validate_completed_history,
 )
 from coding_agent.file_tools import (
     DEFAULT_MAX_FILE_BYTES,
@@ -58,7 +59,20 @@ from coding_agent.models import (
     Usage,
 )
 from coding_agent.provider import FakeProvider, ModelProvider, OpenAICompatibleProvider
-from coding_agent.session import AgentSession
+from coding_agent.session import SESSION_SAVE_ERROR_STOP_REASON, AgentSession
+from coding_agent.session_store import (
+    DEFAULT_MAX_SESSION_BYTES,
+    MAX_SESSION_ID_LENGTH,
+    SESSION_SCHEMA_VERSION,
+    SessionArchive,
+    SessionConflictError,
+    SessionNotFoundError,
+    SessionPathError,
+    SessionSizeError,
+    SessionStore,
+    SessionStoreError,
+    SessionValidationError,
+)
 from coding_agent.tools import (
     DEFAULT_MAX_LIST_ENTRIES,
     DEFAULT_MAX_OUTPUT_CHARS,
@@ -90,6 +104,7 @@ __all__ = [
     "AgentLoop",
     "AgentRunResult",
     "AgentSession",
+    "SESSION_SAVE_ERROR_STOP_REASON",
     "AgentEvent",
     "AgentEventCallback",
     "COMPLETED_STOP_REASON",
@@ -156,4 +171,16 @@ __all__ = [
     "measure_context_bytes",
     "select_context",
     "serialize_context",
+    "validate_completed_history",
+    "DEFAULT_MAX_SESSION_BYTES",
+    "MAX_SESSION_ID_LENGTH",
+    "SESSION_SCHEMA_VERSION",
+    "SessionArchive",
+    "SessionConflictError",
+    "SessionNotFoundError",
+    "SessionPathError",
+    "SessionSizeError",
+    "SessionStore",
+    "SessionStoreError",
+    "SessionValidationError",
 ]
