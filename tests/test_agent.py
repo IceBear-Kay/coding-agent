@@ -141,6 +141,21 @@ def test_agent_loop_rejects_output_budget_that_exhausts_model_window(tmp_path: P
         )
 
 
+def test_agent_loop_reports_token_limit_independently_of_byte_limit(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    result = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        max_context_bytes=8_388_608,
+        max_context_tokens=1,
+        context_policy="stop",
+    ).run("This request exceeds one estimated token")
+
+    assert result.stop_reason == "context_limit"
+    assert "token budget" in str(result.error)
+    assert provider.requests == []
+
+
 def test_agent_loop_reads_document_into_tool_history(tmp_path: Path) -> None:
     document = Document()
     document.add_paragraph("Document heading")

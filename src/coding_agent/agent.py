@@ -223,7 +223,7 @@ class AgentLoop:
                 except (ContextHistoryError, ContextSerializationError) as exc:
                     state.stop_reason = CONTEXT_ERROR_STOP_REASON
                     return result(error=exc)
-                if context_result.exceeded:
+                if context_result.used_bytes > context_result.max_bytes:
                     state.stop_reason = CONTEXT_LIMIT_STOP_REASON
                     error = ContextLimitError(
                         used_bytes=context_result.used_bytes,
