@@ -588,7 +588,7 @@ def test_cli_parser_exposes_runtime_budget_defaults() -> None:
 
 
 @pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
-def test_cli_accepts_v4_output_override_and_rejects_over_cap(
+def test_cli_applies_v4_output_default_override_and_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -596,18 +596,35 @@ def test_cli_accepts_v4_output_override_and_rejects_over_cap(
     monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.example.com")
     monkeypatch.setenv("DEEPSEEK_MODEL", model)
     monkeypatch.setenv("DEEPSEEK_TIMEOUT_SECONDS", "30")
+    providers: list[FakeProvider] = []
 
-    provider = FakeProvider([ModelResponse(text="ok", finish_reason="stop")])
+    def create_provider(_config: object) -> FakeProvider:
+        provider = FakeProvider([ModelResponse(text="ok", finish_reason="stop")])
+        providers.append(provider)
+        return provider
+
+    monkeypatch.setattr("coding_agent.cli.OpenAICompatibleProvider", create_provider)
+
     assert (
         main(
-            ["hello", "--workspace", str(tmp_path), "--max-output-tokens", "65536"],
-            provider=provider,
+            ["hello", "--workspace", str(tmp_path)],
+            provider=None,
         )
         == 0
     )
-    assert provider.max_tokens == [65_536]
+    assert providers[-1].max_tokens == [32_768]
+
+    assert (
+        main(
+            ["hello", "--workspace", str(tmp_path), "--max-output-tokens", "65536"],
+            provider=None,
+        )
+        == 0
+    )
+    assert providers[-1].max_tokens == [65_536]
 
     errors: list[str] = []
+    provider_count = len(providers)
     assert (
         main(
             ["hello", "--workspace", str(tmp_path), "--max-output-tokens", "384001"],
@@ -617,6 +634,7 @@ def test_cli_accepts_v4_output_override_and_rejects_over_cap(
         == 2
     )
     assert errors and "max-output-tokens" in errors[0]
+    assert len(providers) == provider_count
 
 
 def test_cli_rejects_non_positive_context_budget_before_provider_call(tmp_path: Path) -> None:
