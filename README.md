@@ -15,12 +15,12 @@
 环境要求：Python 3.12、[uv](https://docs.astral.sh/uv/) 和 DeepSeek API Key。
 
 ```powershell
-git clone --branch develop https://github.com/IceBear-Kay/coding-agent.git
+git clone https://github.com/IceBear-Kay/coding-agent.git
 Set-Location .\coding-agent
 uv sync --frozen
 ```
 
-当前可运行代码位于 `develop`；仓库默认分支 `main` 暂不包含运行入口。下面创建一个普通示例工作区，不使用私人 `.local/`：
+仓库默认分支 `main` 包含当前可运行代码。下面创建一个普通示例工作区，不使用私人 `.local/`：
 
 ```powershell
 $demo = Join-Path (Get-Location) 'coding-agent-demo'
