@@ -644,6 +644,29 @@ def test_cli_parser_accepts_explicit_disable_switches() -> None:
     assert args.show_tool_events is False
 
 
+def test_cli_parser_accepts_plan_visibility_switches() -> None:
+    assert build_parser().parse_args(["--show-plan"]).show_plan is True
+    assert build_parser().parse_args(["--no-show-plan"]).show_plan is False
+
+
+def test_cli_help_command_does_not_call_provider(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    inputs = iter(["/help", "/exit"])
+    output: list[str] = []
+
+    assert (
+        main(
+            ["--chat", "--no-save", "--workspace", str(tmp_path), "--read-only"],
+            provider=provider,
+            input_fn=lambda _: next(inputs),
+            output_fn=output.append,
+        )
+        == 0
+    )
+    assert any("/sessions" in line and "/rename" in line for line in output)
+    assert provider.requests == []
+
+
 @pytest.mark.parametrize(
     "flags",
     [
@@ -683,6 +706,7 @@ def test_cli_parser_exposes_runtime_budget_defaults() -> None:
     assert args.max_context_tokens == 524_288
     assert args.max_output_tokens == 32_768
     assert args.max_context_bytes == 8_388_608
+    assert args.show_plan is None
 
 
 @pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
@@ -1272,6 +1296,57 @@ def test_cli_hiding_tool_events_preserves_execution_and_history(tmp_path: Path) 
     assert hidden_output == ["文件已读取。", "停止原因: completed"]
 
 
+def test_cli_shows_optional_assistant_plan_before_tool_progress(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                text="计划：先读取文件。",
+                tool_calls=[
+                    ToolCall(id="call_plan", name="read_file", arguments={"path": "x.txt"})
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="已完成。", finish_reason="stop"),
+        ]
+    )
+    (tmp_path / "x.txt").write_text("内容", encoding="utf-8")
+    output: list[str] = []
+    assert (
+        main(
+            ["读取", "--workspace", str(tmp_path), "--read-only"],
+            provider=provider,
+            output_fn=output.append,
+        )
+        == 0
+    )
+    assert output[0] == "计划：先读取文件。"
+    assert output[1].startswith("工具调用: read_file")
+
+    hidden = FakeProvider(
+        [
+            ModelResponse(
+                text="计划：隐藏。",
+                tool_calls=[
+                    ToolCall(id="call_hidden_plan", name="read_file", arguments={"path": "x.txt"})
+                ],
+                finish_reason="tool_calls",
+            ),
+            ModelResponse(text="已完成。", finish_reason="stop"),
+        ]
+    )
+    hidden_output: list[str] = []
+    assert (
+        main(
+            ["读取", "--workspace", str(tmp_path), "--read-only", "--no-show-plan"],
+            provider=hidden,
+            output_fn=hidden_output.append,
+        )
+        == 0
+    )
+    assert all("计划：隐藏" not in line for line in hidden_output)
+    assert hidden_output[-2:] == ["已完成。", "停止原因: completed"]
+
+
 def test_cli_hiding_tool_events_keeps_approval_and_errors_visible(tmp_path: Path) -> None:
     provider = FakeProvider(
         [
@@ -1321,7 +1396,7 @@ def test_cli_prompts_for_task_when_argument_is_omitted(tmp_path: Path) -> None:
     )
 
     assert exit_code == 0
-    assert prompts == ["任务: "]
+    assert prompts == ["输入指令："]
     assert output == ["Done", "停止原因: completed"]
 
 

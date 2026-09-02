@@ -20,6 +20,7 @@ CLI
 
 - **CLI**：接收任务、工作区和运行参数，按需显示工具过程并显示最终结果。
 - **Agent Loop**：连接模型与工具，追加消息并决定何时结束。
+- **运行时提示词与事件**：系统提示词位于 `src/coding_agent/prompts.py`；Agent Loop 只发布结构化工具和 assistant 事件，CLI 决定计划、Markdown、状态和纯文本降级的呈现方式。
 - **AgentState**：保存消息、步骤、工作区、停止原因和上下文裁剪统计；每次任务还记录独立的运行统计。
 - **ModelProvider**：屏蔽模型厂商差异，输出统一 `ModelResponse`。
 - **Tool Registry/Dispatcher**：暴露工具 Schema、验证参数并调度本地实现。
