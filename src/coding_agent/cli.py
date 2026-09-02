@@ -585,11 +585,18 @@ def _run_chat(
             if task == "/compact":
                 compact_result = session.compact()
                 if compact_result.success:
+                    usage_note = (
+                        f"摘要请求用量：输入 {compact_result.input_tokens}、"
+                        f"输出 {compact_result.output_tokens} Token。"
+                        if compact_result.input_tokens is not None
+                        and compact_result.output_tokens is not None
+                        else "摘要请求用量：未知。"
+                    )
                     output_fn(
                         "已生成历史摘要："
                         f"覆盖 {compact_result.covered_task_count} 个较早任务，"
                         f"请求上下文估算由 {compact_result.before_bytes} 字节降至 "
-                        f"{compact_result.after_bytes} 字节；完整历史仍保留。"
+                        f"{compact_result.after_bytes} 字节；完整历史仍保留。{usage_note}"
                     )
                 elif compact_result.reason == "compact_policy_required":
                     error_fn("当前 context-policy 不是 compact，未生成摘要。")
@@ -704,11 +711,18 @@ def _run_chat(
             compaction_result = session.last_compaction_result
             if compaction_result is not None:
                 if compaction_result.success:
+                    usage_note = (
+                        f"摘要请求用量：输入 {compaction_result.input_tokens}、"
+                        f"输出 {compaction_result.output_tokens} Token。"
+                        if compaction_result.input_tokens is not None
+                        and compaction_result.output_tokens is not None
+                        else "摘要请求用量：未知。"
+                    )
                     output_fn(
                         "上下文摘要：已覆盖 "
                         f"{compaction_result.covered_task_count} 个较早任务，"
                         f"请求上下文由 {compaction_result.before_bytes} 字节降至 "
-                        f"{compaction_result.after_bytes} 字节；完整历史仍保留。"
+                        f"{compaction_result.after_bytes} 字节；完整历史仍保留。{usage_note}"
                     )
                 elif compaction_result.reason not in {"nothing_to_compact"}:
                     output_fn(
