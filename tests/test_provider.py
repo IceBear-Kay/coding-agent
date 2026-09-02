@@ -119,6 +119,17 @@ def test_build_chat_completion_payload_accepts_no_tools() -> None:
     assert payload["tools"] == []
 
 
+def test_build_chat_completion_payload_includes_output_budget_when_requested() -> None:
+    payload = build_chat_completion_payload(
+        provider_config(),
+        [Message(role="user", content="Hello")],
+        [],
+        max_tokens=123,
+    )
+
+    assert payload["max_tokens"] == 123
+
+
 def test_serialize_message_for_api_preserves_reasoning_and_tool_call_fields() -> None:
     message = Message(
         role="assistant",
@@ -513,6 +524,7 @@ def test_openai_compatible_provider_composes_request_and_parser() -> None:
         response = provider.complete(
             [Message(role="user", content="Inspect the project")],
             [],
+            max_tokens=123,
         )
 
     assert isinstance(provider, ModelProvider)
@@ -522,6 +534,7 @@ def test_openai_compatible_provider_composes_request_and_parser() -> None:
             "model": "test-model",
             "messages": [{"role": "user", "content": "Inspect the project"}],
             "tools": [],
+            "max_tokens": 123,
         }
     ]
 

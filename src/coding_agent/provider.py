@@ -36,6 +36,8 @@ class ModelProvider(Protocol):
         self,
         messages: Sequence[Message],
         tool_schemas: Sequence[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
     ) -> ModelResponse:
         """Generate the next model response for the current conversation."""
         ...
@@ -45,13 +47,20 @@ def build_chat_completion_payload(
     config: ProviderConfig,
     messages: Sequence[Message],
     tool_schemas: Sequence[dict[str, Any]],
+    *,
+    max_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Build the JSON-compatible body for an OpenAI-compatible chat request."""
-    return {
+    payload = {
         "model": config.model,
         "messages": [serialize_message_for_api(message) for message in messages],
         "tools": list(tool_schemas),
     }
+    if max_tokens is not None:
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
+            raise ValueError("max_tokens must be a positive integer")
+        payload["max_tokens"] = max_tokens
+    return payload
 
 
 def serialize_message_for_api(message: Message) -> dict[str, Any]:
@@ -258,9 +267,16 @@ class OpenAICompatibleProvider:
         self,
         messages: Sequence[Message],
         tool_schemas: Sequence[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
     ) -> ModelResponse:
         """Build, send, and parse one chat completion request."""
-        payload = build_chat_completion_payload(self.config, messages, tool_schemas)
+        payload = build_chat_completion_payload(
+            self.config,
+            messages,
+            tool_schemas,
+            max_tokens=max_tokens,
+        )
         raw_response = send_chat_completion_request(self.config, payload, self.client)
         return parse_chat_completion_response(raw_response)
 
@@ -271,11 +287,14 @@ class FakeProvider:
     def __init__(self, responses: Sequence[ModelResponse]) -> None:
         self._responses = [response.model_copy(deep=True) for response in responses]
         self.requests: list[tuple[list[Message], list[dict[str, Any]]]] = []
+        self.max_tokens: list[int | None] = []
 
     def complete(
         self,
         messages: Sequence[Message],
         tool_schemas: Sequence[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
     ) -> ModelResponse:
         """Record one request and return the next configured response."""
         if not self._responses:
@@ -287,4 +306,5 @@ class FakeProvider:
                 deepcopy(list(tool_schemas)),
             )
         )
+        self.max_tokens.append(max_tokens)
         return self._responses.pop(0).model_copy(deep=True)

@@ -24,7 +24,8 @@ CLI
 - **ModelProvider**：屏蔽模型厂商差异，输出统一 `ModelResponse`。
 - **Tool Registry/Dispatcher**：暴露工具 Schema、验证参数并调度本地实现。
 - **Document Parser**：在工作区边界内有界读取文本型 PDF 和简单 DOCX；打开文件前后复核文件描述符与父目录身份，解析在可终止的受控进程中进行，结果以有界结构化只读工具消息返回。
-- **Context Policy**：按 UTF-8 字节预算检查请求上下文；默认 `stop` 在超限时停止，显式 `trim` 时按完整旧任务从最早开始裁剪，当前不提供摘要压缩。
+- **Context Policy**：按 UTF-8 字节预算和输入 token 粗估检查请求上下文；默认 `trim` 时按完整旧任务从最早开始裁剪，`stop` 在超限时停止，当前不提供摘要压缩。
+- **Runtime budgets**：请求前同时检查字节预算与基于序列化 UTF-8 大小的输入 token 粗估，并为 `max_tokens` 输出额度预留模型窗口安全余量；粗估不等同于厂商 tokenizer。
 - **AgentSession / SessionStore**：在聊天任务正常完成后提交完整历史；可选 JSON 存档支持跨进程恢复，使用会话生命周期独占锁、原子写入并校验工作区和历史结构。
 
 CLI 通过轻量执行事件显示实际的工具调用和结构化结果摘要，包括文件相对路径、命令
@@ -84,7 +85,7 @@ Provider 将内部消息转换为 OpenAI-compatible 请求格式：工具参数�
 - Agent Loop 会保留完整对话历史、Assistant Tool Calls、`reasoning_content` 和原始 `tool_call_id`，并区分正常完成、`max_steps`、`interrupted`、Provider 错误及非正常 `finish_reason`。
 - `--show-stats` 展示本次任务的 Provider 请求、工具调度、工具错误、服务端 `usage` Token、上下文字节数和耗时。统计只存在于 `AgentState`/`AgentRunResult`，不进入消息历史；缺失 `usage` 的请求单独标记为未知。
 - 端到端离线测试使用 `FakeProvider` 驱动真实文件和受控本地进程，覆盖读取题目、批准写入、运行失败、精确编辑、再次运行成功以及拒绝和超时路径；OpenAI-compatible 协议使用 `httpx.MockTransport` 验证，不调用真实模型。
-- 当前不删除文件，不提供自动审批、上下文摘要压缩或中断续跑。持久聊天可保存和恢复正常完成任务的完整历史，但不保存 Provider 配置、环境变量、API Key、审批状态或进程对象；本地命令以当前用户权限运行，路径检查、最小环境、资源预算和审批不等同于操作系统沙箱。
+- 当前不删除文件，不提供自动审批、上下文摘要压缩或中断续跑。持久聊天可保存和恢复正常完成任务的完整历史，但不保存 Provider 配置、环境变量、API Key、审批状态或进程对象；本地命令以当前用户权限运行，路径检查、最小环境、资源预算和审批不等同于操作系统沙箱。CLI 从启动目录读取 `.env`，进程环境变量优先；未知模型不会静默套用已知窗口能力。
 
 ## Safety
 

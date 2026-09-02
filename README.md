@@ -49,7 +49,7 @@ if (-not (Test-Path -LiteralPath $notes)) {
 - `DEEPSEEK_MODEL`：必填的模型标识。
 - `DEEPSEEK_TIMEOUT_SECONDS`：必填的 API 请求超时秒数，必须大于 0；模板使用 `60`。
 
-仓库提供不含凭据的 `.env.example`。程序不会自动搜索或读取 `.env`；需要使用配置文件时，必须通过 `uv run --env-file .env` 显式加载。下面的命令只在目标不存在时复制模板，已有 `.env` 会原样保留且不会被读取或覆盖：
+仓库提供不含凭据的 `.env.example`。程序启动时会读取启动目录下的 `.env`；也可通过 `uv run --env-file .env` 显式加载。下面的命令只在目标不存在时复制模板，已有 `.env` 会原样保留且不会被读取或覆盖：
 
 ```powershell
 if (Test-Path -LiteralPath .env) {
@@ -213,16 +213,18 @@ uv run coding-agent --help
 | `--show-stats` | 默认关闭 | 任务结束时显示本次运行的耗时、Provider 请求、工具调度、上下文和 Token 统计；不改变模型行为。 |
 | `--command-timeout` | `20.0` 秒 | 本地命令超时；必须是有限数值，且大于 0、不超过 60 秒。 |
 | `--command-output-limit` | `65536` 字节 | 本地命令 `stdout` 与 `stderr` 共享上限；范围为 1 至 1048576。 |
-| `--max-steps` | `8` | 每个任务的 Provider 调用次数上限，必须为正整数；临时错误重试也计入。不是工具调用次数上限。 |
+| `--max-steps` | `64` | 每个任务的 Provider 调用次数上限，必须为正整数；临时错误重试也计入。不是工具调用次数上限。 |
 | `--max-retries` | `2` | 每个任务中单次临时 Provider 错误的最大重试次数，必须为非负整数；设为 `0` 关闭自动重试。 |
-| `--max-context-bytes` | `262144` | 每次 Provider 请求前的上下文 UTF-8 字节预算，必须为正整数；超限时按 `--context-policy` 处理。 |
-| `--context-policy` | `stop` | 上下文超预算时的策略；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。 |
+| `--max-context-bytes` | `8388608` | 每次 Provider 请求前的上下文 UTF-8 字节预算，必须为正整数；超限时按 `--context-policy` 处理。 |
+| `--max-context-tokens` | `524288` | 每次请求输入 token 的本地粗估预算；不是精确 tokenizer 计数。 |
+| `--max-output-tokens` | `32768` | 每次模型请求传入的 `max_tokens` 上限；受已知模型能力约束。 |
+| `--context-policy` | `trim` | 上下文超预算时的策略；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。 |
 
 `--max-steps` 统计模型请求次数；一次模型响应可以包含多个工具调用，这些调用按模型给出的顺序处理。在 `--chat` 模式中，每个新任务都会重新计算 `--max-steps` 和重试预算。写入和执行工具仍按调用逐次审批。`DEEPSEEK_TIMEOUT_SECONDS` 控制 API 网络请求，与 `--command-timeout` 控制的本地子进程超时无关。
 
 使用 `--show-stats` 可在每个任务结束时查看本次运行摘要。Provider 请求次数包含实际重试，工具调度次数包含拒绝、参数错误和执行失败；这些统计不等同于副作用成功次数。Token 只累加服务端返回的 `ModelResponse.usage`，没有 usage 的请求会单独标记为未知，不会按字节估算或显示为零。统计仅用于展示，不会写入消息历史或持久会话存档。
 
-`--max-context-bytes` 是软件级输入预算，按内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数统计。它不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证。预算超限时，默认 `--context-policy stop` 返回 `context_limit` 且不发送请求；显式使用 `--context-policy trim` 时，才会按完整旧任务从最早开始裁剪，仍无法满足预算则返回 `context_limit`。两种策略都不会摘要或重试该请求。在 `--chat` 中，正常完成任务的历史会继续计入预算；`/clear` 后只计算新历史。
+`--max-context-bytes` 是软件级输入预算，按内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数统计。`--max-context-tokens` 使用同一请求表示的 UTF-8 字节进行本地粗估，不声称等于 DeepSeek tokenizer 的精确结果。模型窗口、输出额度和 16384 token 安全余量会共同限制有效输入预算。预算超限时，默认 `--context-policy trim` 按完整旧任务从最早开始裁剪；`stop` 则立即返回 `context_limit`。仍无法满足任一约束时不发送请求。两种策略都不会摘要或重试该请求。在 `--chat` 中，正常完成任务的历史会继续计入预算；`/clear` 后只计算新历史。
 
 ## 审批与限制
 
@@ -231,7 +233,7 @@ uv run coding-agent --help
 - 正常结束只表示模型不再请求工具，不等于生成的程序通过了独立测试；命令的退出码 `0` 也不自动证明答案正确。
 - `--chat` 默认只在当前进程内保存正常完成任务的历史；使用 `--session` 或 `--resume` 可将完整历史保存到 JSON 存档并跨进程恢复。`max_steps`、Provider 错误和非正常模型停止原因会结束整个会话，不继续使用不完整历史。
 - `/clear` 在普通聊天中只清空内存消息；在持久聊天中保留旧存档并切换到新的空会话 ID。两种模式都不删除工作区文件，也不改变工具开关和运行参数。
-- 会话存档不支持中断续跑、跨设备同步、数据库和自动迁移；当前仍不提供上下文摘要压缩，历史裁剪仅在显式设置 `--context-policy trim` 时按完整旧任务执行，默认策略为 `stop`。
+- 会话存档不支持中断续跑、跨设备同步、数据库和自动迁移；当前仍不提供上下文摘要压缩，历史裁剪按 `--context-policy` 执行，默认策略为 `trim`。
 - 会话文件属于私人数据，应放在未被 Git 跟踪的目录中；存档目录不允许 Agent 文件工具直接访问。
 - 文件工具只处理受工作区约束的 UTF-8 文本，不提供删除文件操作。
 - 本地命令以当前用户权限运行。路径检查、审批、资源预算和进程清理用于降低常见误操作风险，不是操作系统级沙箱，也不能阻止被批准程序主动访问其他资源。

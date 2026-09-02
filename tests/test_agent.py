@@ -115,6 +115,30 @@ def test_agent_loop_runs_tool_then_returns_final_answer(tmp_path: Path) -> None:
     ]
     assert provider.requests[1][0] == result.state.messages[:3]
     assert provider.requests[0][0] == result.state.messages[:1]
+    assert provider.max_tokens == [32_768, 32_768]
+
+
+def test_agent_loop_derives_effective_input_budget_from_model_window(tmp_path: Path) -> None:
+    provider = FakeProvider([ModelResponse(text="Done", finish_reason="stop")])
+    loop = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        max_context_tokens=90_000,
+        max_output_tokens=20_000,
+        model_window_tokens=100_000,
+    )
+
+    assert loop.effective_context_tokens == 63_616
+
+
+def test_agent_loop_rejects_output_budget_that_exhausts_model_window(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="leaves no model context budget"):
+        AgentLoop(
+            FakeProvider([]),
+            Workspace(tmp_path),
+            max_output_tokens=90_000,
+            model_window_tokens=100_000,
+        )
 
 
 def test_agent_loop_reads_document_into_tool_history(tmp_path: Path) -> None:
@@ -963,7 +987,7 @@ def test_agent_loop_collects_task_runtime_usage_and_tool_counts(tmp_path: Path) 
     assert result.stats.output_tokens == 6
     assert result.stats.total_tokens == 36
     assert result.stats.context_bytes is not None
-    assert result.stats.context_max_bytes == 262144
+    assert result.stats.context_max_bytes == 8_388_608
     assert result.stats.runtime_seconds >= 0
 
 

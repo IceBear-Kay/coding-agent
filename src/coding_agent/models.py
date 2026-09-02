@@ -60,6 +60,8 @@ class TaskStats(BaseModel):
     unknown_usage_requests: int = Field(default=0, ge=0)
     context_bytes: int | None = Field(default=None, ge=0)
     context_max_bytes: int | None = Field(default=None, ge=1)
+    context_tokens: int | None = Field(default=None, ge=0)
+    context_max_tokens: int | None = Field(default=None, ge=1)
     context_trimmed_tasks: int = Field(default=0, ge=0)
     runtime_seconds: float = Field(default=0.0, ge=0.0)
     stop_reason: str | None = Field(default=None, min_length=1)

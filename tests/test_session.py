@@ -207,6 +207,7 @@ def test_session_context_budget_applies_to_accumulated_history(tmp_path: Path) -
             registry=registry,
             max_steps=1,
             max_context_bytes=max_context_bytes,
+            context_policy="stop",
         )
     )
 

@@ -2,8 +2,11 @@
 
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Self
 
+from dotenv import dotenv_values
 from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, ValidationError
 
 from coding_agent.errors import ProviderConfigurationError
@@ -14,6 +17,41 @@ ENVIRONMENT_FIELDS = {
     "model": "DEEPSEEK_MODEL",
     "timeout_seconds": "DEEPSEEK_TIMEOUT_SECONDS",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ModelCapability:
+    """Known model limits used to coordinate input and output budgets."""
+
+    context_window_tokens: int
+    max_output_tokens: int
+
+
+MODEL_CAPABILITIES: dict[str, ModelCapability] = {
+    "deepseek-v4-flash": ModelCapability(1_000_000, 32_768),
+    "deepseek-v4-pro": ModelCapability(1_000_000, 32_768),
+}
+
+
+def load_startup_environment(startup_dir: Path | None = None) -> dict[str, str]:
+    """Merge supported values from startup-directory ``.env`` and the process."""
+    directory = Path.cwd() if startup_dir is None else Path(startup_dir)
+    file_values = dotenv_values(directory / ".env", interpolate=False)
+    merged: dict[str, str] = {
+        key: value
+        for key, value in file_values.items()
+        if key in ENVIRONMENT_FIELDS.values() and isinstance(value, str)
+    }
+    for name in ENVIRONMENT_FIELDS.values():
+        value = os.environ.get(name)
+        if value is not None:
+            merged[name] = value
+    return merged
+
+
+def model_capability(model: str) -> ModelCapability | None:
+    """Return known limits for a model, or ``None`` for an unknown identifier."""
+    return MODEL_CAPABILITIES.get(model.strip().lower())
 
 
 class ProviderConfig(BaseModel):

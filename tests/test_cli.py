@@ -568,14 +568,23 @@ def test_cli_parser_accepts_context_budget() -> None:
     assert args.max_context_bytes == 4096
 
 
-def test_cli_parser_context_policy_defaults_to_stop_and_accepts_trim() -> None:
-    assert build_parser().parse_args([]).context_policy == "stop"
+def test_cli_parser_context_policy_defaults_to_trim_and_accepts_stop() -> None:
+    assert build_parser().parse_args([]).context_policy == "trim"
     assert build_parser().parse_args(["--context-policy", "trim"]).context_policy == "trim"
 
     with pytest.raises(SystemExit) as exc_info:
         build_parser().parse_args(["--context-policy", "invalid"])
 
     assert exc_info.value.code == 2
+
+
+def test_cli_parser_exposes_runtime_budget_defaults() -> None:
+    args = build_parser().parse_args([])
+
+    assert args.max_steps == 64
+    assert args.max_context_tokens == 524_288
+    assert args.max_output_tokens == 32_768
+    assert args.max_context_bytes == 8_388_608
 
 
 def test_cli_rejects_non_positive_context_budget_before_provider_call(tmp_path: Path) -> None:
