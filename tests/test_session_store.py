@@ -53,6 +53,64 @@ def test_session_store_round_trips_versioned_complete_history(tmp_path: Path) ->
     assert "api_key" not in payload
 
 
+def test_session_title_round_trip_and_legacy_archive_compatibility(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    archive = store.create("titled", tmp_path, [], now=datetime.now(UTC))
+    lease = store.acquire("titled")
+    titled = store.save(
+        archive.model_copy(update={"title": "  任务概览  ", "title_generation_attempted": True}),
+        lease=lease,
+    )
+    lease.release()
+    assert titled.title == "任务概览"
+    assert store.load("titled").title == "任务概览"
+
+    legacy = store.path_for("legacy")
+    payload = json.loads(store.path_for("titled").read_text(encoding="utf-8"))
+    payload["session_id"] = "legacy"
+    payload.pop("title", None)
+    payload.pop("title_generation_attempted", None)
+    legacy.write_text(json.dumps(payload), encoding="utf-8")
+    assert store.load("legacy").title is None
+
+
+@pytest.mark.parametrize("title", ["", "a\nb", "a\x00b"])
+def test_session_title_rejects_invalid_values(tmp_path: Path, title: str) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    archive = store.create("chat_1", tmp_path, [])
+    lease = store.acquire("chat_1")
+    with pytest.raises((SessionValidationError, ValueError)):
+        store.save(archive.model_copy(update={"title": title}), lease=lease)
+    lease.release()
+
+
+def test_session_title_is_bounded(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    archive = store.create("chat_1", tmp_path, [])
+    lease = store.acquire("chat_1")
+    updated = store.save(archive.model_copy(update={"title": "x" * 200}), lease=lease)
+    lease.release()
+    assert len(updated.title or "") == 60
+
+
+def test_list_sessions_filters_workspace_and_sorts_and_skips_bad_files(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    first = store.create("first", tmp_path, [])
+    store.save(first.model_copy(update={"title": "较早"}), now=datetime.now(UTC))
+    second = store.create("second", tmp_path, [])
+    store.save(
+        second.model_copy(update={"title": "较新"}),
+        now=datetime.now(UTC) + timedelta(seconds=2),
+    )
+    other = store.create("other", tmp_path / "other", [])
+    assert other.workspace_root != str(tmp_path.resolve())
+    store.path_for("broken").write_text("not json", encoding="utf-8")
+
+    archives, skipped = store.list_sessions(workspace_root=tmp_path)
+    assert [archive.session_id for archive in archives] == ["second", "first"]
+    assert skipped == ["broken.json: skipped", "other.json: skipped"]
+
+
 def test_session_store_refuses_duplicate_and_stale_updates(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions")
     archive = store.create("chat_1", tmp_path, [], now=datetime.now(UTC))

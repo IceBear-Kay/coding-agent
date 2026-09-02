@@ -20,6 +20,7 @@ from coding_agent.models import Message
 SESSION_SCHEMA_VERSION = 1
 DEFAULT_MAX_SESSION_BYTES = 32 * 1024 * 1024
 MAX_SESSION_ID_LENGTH = 64
+MAX_SESSION_TITLE_LENGTH = 60
 _SESSION_ID_PATTERN = re.compile(rf"^[A-Za-z0-9][A-Za-z0-9_-]{{0,{MAX_SESSION_ID_LENGTH - 1}}}$")
 _WINDOWS_RESERVED_NAMES = {
     "aux",
@@ -194,6 +195,22 @@ def _normalize_timestamp(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
+def _normalize_title(value: str | None) -> str | None:
+    """Validate and safely bound user-visible session titles."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("title must be a string")
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError("title must not be empty")
+    if any(character.isspace() and character not in {" "} for character in normalized):
+        raise ValueError("title must be a single line")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in normalized):
+        raise ValueError("title contains control characters")
+    return normalized[:MAX_SESSION_TITLE_LENGTH]
+
+
 class SessionArchive(BaseModel):
     """The only data written to a persisted session archive."""
 
@@ -205,6 +222,8 @@ class SessionArchive(BaseModel):
     created_at: datetime
     updated_at: datetime
     revision: int = Field(default=0, ge=0)
+    title: str | None = None
+    title_generation_attempted: bool = False
     messages: list[Message] = Field(default_factory=list)
 
     @field_validator("session_id")
@@ -222,6 +241,11 @@ class SessionArchive(BaseModel):
     def validate_timestamp(cls, value: datetime) -> datetime:
         return _normalize_timestamp(value)
 
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, value: str | None) -> str | None:
+        return _normalize_title(value)
+
     def model_post_init(self, __context: Any) -> None:
         if self.updated_at < self.created_at:
             raise ValueError("updated_at must not precede created_at")
@@ -238,6 +262,8 @@ class SessionArchive(BaseModel):
         messages: Sequence[Message] = (),
         *,
         now: datetime | None = None,
+        title: str | None = None,
+        title_generation_attempted: bool = False,
     ) -> Self:
         timestamp = _normalize_timestamp(now or datetime.now(UTC))
         try:
@@ -246,6 +272,8 @@ class SessionArchive(BaseModel):
                 workspace_root=str(workspace_root),
                 created_at=timestamp,
                 updated_at=timestamp,
+                title=title,
+                title_generation_attempted=title_generation_attempted,
                 messages=[message.model_copy(deep=True) for message in messages],
             )
         except (TypeError, ValueError, ValidationError) as exc:
@@ -255,6 +283,9 @@ class SessionArchive(BaseModel):
         """Serialize using a stable compact UTF-8 JSON representation."""
         try:
             payload = self.model_dump(mode="json", exclude_none=True)
+            # Keep archives written before title metadata byte-for-byte compatible.
+            if payload.get("title_generation_attempted") is False:
+                payload.pop("title_generation_attempted")
             for message in payload["messages"]:
                 message.setdefault("content", None)
             return json.dumps(
@@ -353,6 +384,46 @@ class SessionStore:
             if os.path.normcase(archive.workspace_root) != os.path.normcase(expected):
                 raise SessionConflictError("session workspace does not match")
         return archive
+
+    def list_sessions(
+        self,
+        *,
+        workspace_root: Path | str | None = None,
+    ) -> tuple[list[SessionArchive], list[str]]:
+        """Return readable archives for a workspace and safe skip notices.
+
+        Invalid, oversized, or redirected files are never removed; callers receive
+        opaque notices suitable for displaying without exposing archive contents.
+        """
+        expected = (
+            _normalize_workspace_root(str(workspace_root)) if workspace_root is not None else None
+        )
+        archives: list[SessionArchive] = []
+        skipped: list[str] = []
+        try:
+            candidates = sorted(self.root.glob("*.json"), key=lambda path: path.name.casefold())
+        except OSError as exc:
+            raise SessionStoreError("session directory could not be listed") from exc
+        for path in candidates:
+            session_id = path.stem
+            try:
+                _validate_session_id(session_id)
+                archive = self.load(session_id, workspace_root=expected)
+            except (SessionStoreError, ValueError):
+                skipped.append(f"{path.name}: skipped")
+                continue
+            archives.append(archive)
+        archives.sort(key=lambda archive: archive.updated_at, reverse=True)
+        return archives, skipped
+
+    def list(
+        self,
+        *,
+        workspace_root: Path | str | None = None,
+    ) -> list[SessionArchive]:
+        """List readable sessions while ignoring unsafe or invalid archives."""
+        archives, _ = self.list_sessions(workspace_root=workspace_root)
+        return archives
 
     def save(
         self,
@@ -511,6 +582,7 @@ def _is_reparse_point(path: Path) -> bool:
 __all__ = [
     "DEFAULT_MAX_SESSION_BYTES",
     "MAX_SESSION_ID_LENGTH",
+    "MAX_SESSION_TITLE_LENGTH",
     "SESSION_SCHEMA_VERSION",
     "SessionArchive",
     "SessionConflictError",

@@ -659,3 +659,36 @@ def test_fake_provider_rejects_requests_after_responses_are_exhausted() -> None:
 
     with pytest.raises(ProviderResponseError, match="no remaining responses"):
         provider.complete([], [])
+
+
+def test_openai_provider_generate_title_is_bounded_and_tool_free() -> None:
+    config = provider_config()
+    requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "会话标题",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(config, client)
+        response = provider.generate_title("x" * 2_000)
+
+    assert response.text == "会话标题"
+    assert requests[0]["tools"] == []
+    assert requests[0]["max_tokens"] == 256
+    assert requests[0]["thinking"] == {"type": "disabled"}
+    assert len(requests[0]["messages"][1]["content"]) == 1000

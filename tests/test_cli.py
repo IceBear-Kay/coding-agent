@@ -50,6 +50,14 @@ def test_cli_parser_accepts_chat_mode() -> None:
 
     assert args.chat is True
     assert args.task is None
+    assert args.no_save is False
+
+
+def test_cli_parser_accepts_no_save_chat_mode() -> None:
+    args = build_parser().parse_args(["--chat", "--no-save"])
+
+    assert args.chat is True
+    assert args.no_save is True
 
 
 def test_cli_parser_accepts_persistent_session_options() -> None:
@@ -73,8 +81,12 @@ def test_cli_parser_accepts_persistent_session_options() -> None:
             "错误: --session 或 --resume 只能与 --chat 一起使用",
         ),
         (
-            ["--session-dir", "sessions"],
-            "错误: --session-dir 必须与 --session 或 --resume 一起使用",
+            ["--no-chat", "--session-dir", "sessions"],
+            "错误: --session-dir 必须与聊天模式一起使用",
+        ),
+        (
+            ["--no-save", "--session", "chat_1"],
+            "错误: --no-save 不能与持久会话参数一起使用",
         ),
     ],
 )
@@ -469,19 +481,105 @@ def test_cli_startup_output_failure_releases_session_lock(
     lease.release()
 
 
-def test_cli_memory_chat_does_not_create_session_archive(
+def test_cli_no_save_chat_does_not_create_session_archive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     inputs = iter(["普通聊天", "/exit"])
     exit_code = main(
-        ["--chat", "--workspace", str(tmp_path), "--read-only"],
+        ["--chat", "--no-save", "--workspace", str(tmp_path), "--read-only"],
         provider=FakeProvider([ModelResponse(text="完成", finish_reason="stop")]),
         input_fn=lambda _: next(inputs),
     )
 
     assert exit_code == 0
     assert not (tmp_path / ".local" / "sessions").exists()
+
+
+def test_cli_default_chat_creates_and_saves_a_new_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    inputs = iter(["普通聊天", "/exit"])
+    provider = FakeProvider([ModelResponse(text="完成", finish_reason="stop")])
+    output: list[str] = []
+
+    exit_code = main(
+        ["--workspace", str(tmp_path), "--read-only"],
+        provider=provider,
+        input_fn=lambda _: next(inputs),
+        output_fn=output.append,
+    )
+
+    assert exit_code == 0
+    archives = list((tmp_path / ".local" / "sessions").glob("*.json"))
+    assert len(archives) == 1
+    assert "普通聊天" in archives[0].read_text(encoding="utf-8")
+
+
+def test_cli_sessions_lists_and_restores_selected_archive(tmp_path: Path) -> None:
+    store_root = tmp_path / "archives"
+    first_inputs = iter(["旧任务", "/exit"])
+    assert (
+        main(
+            [
+                "--chat",
+                "--session",
+                "old",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+            ],
+            provider=FakeProvider([ModelResponse(text="旧答案", finish_reason="stop")]),
+            input_fn=lambda _: next(first_inputs),
+        )
+        == 0
+    )
+    provider = FakeProvider([ModelResponse(text="恢复后答案", finish_reason="stop")])
+    inputs = iter(["/sessions", "2", "恢复任务", "/exit"])
+    output: list[str] = []
+    assert (
+        main(
+            ["--chat", "--session-dir", str(store_root), "--workspace", str(tmp_path)],
+            provider=provider,
+            input_fn=lambda _: next(inputs),
+            output_fn=output.append,
+        )
+        == 0
+    )
+    assert any("[2] 旧任务" in line for line in output)
+    assert provider.requests
+    assert any(message.content == "旧任务" for message in provider.requests[0][0])
+
+
+def test_cli_rename_updates_metadata_without_provider_request(tmp_path: Path) -> None:
+    store_root = tmp_path / "archives"
+    provider = FakeProvider([])
+    inputs = iter(["/rename 我的会话", "/exit"])
+    output: list[str] = []
+    assert (
+        main(
+            [
+                "--chat",
+                "--session",
+                "chat_1",
+                "--session-dir",
+                str(store_root),
+                "--workspace",
+                str(tmp_path),
+            ],
+            provider=provider,
+            input_fn=lambda _: next(inputs),
+            output_fn=output.append,
+        )
+        == 0
+    )
+    payload = json.loads((store_root / "chat_1.json").read_text(encoding="utf-8"))
+    assert payload["title"] == "我的会话"
+    assert payload["title_generation_attempted"] is True
+    assert provider.requests == []
+    assert output[0].startswith("持久会话 ID: ")
 
 
 def test_cli_parser_preserves_unspecified_defaults_for_mode_and_permissions() -> None:
@@ -712,7 +810,10 @@ def test_cli_rejects_read_only_enable_conflicts_before_provider_call(
     assert provider.requests == []
 
 
-def test_cli_defaults_to_chat_when_task_is_omitted(tmp_path: Path) -> None:
+def test_cli_defaults_to_chat_when_task_is_omitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     provider = FakeProvider(
         [
             ModelResponse(text="第一轮回答", finish_reason="stop"),
@@ -731,6 +832,7 @@ def test_cli_defaults_to_chat_when_task_is_omitted(tmp_path: Path) -> None:
     assert len(provider.requests) == 2
     assert provider.requests[0][0][-1].content == "第一项任务"
     assert provider.requests[1][0][-1].content == "第二项任务"
+    assert len(list((tmp_path / ".local" / "sessions").glob("*.json"))) == 1
 
 
 def test_cli_positional_task_defaults_to_single_run_without_reading_input(
@@ -763,7 +865,7 @@ def test_cli_chat_preserves_history_and_resets_each_task_budget(tmp_path: Path) 
     output: list[str] = []
 
     exit_code = main(
-        ["--chat", "--workspace", str(tmp_path), "--max-steps", "1"],
+        ["--chat", "--no-save", "--workspace", str(tmp_path), "--max-steps", "1"],
         provider=provider,
         input_fn=lambda _: next(inputs),
         output_fn=output.append,
@@ -797,7 +899,7 @@ def test_cli_chat_clear_discards_history_without_calling_provider(tmp_path: Path
     output: list[str] = []
 
     exit_code = main(
-        ["--chat", "--workspace", str(tmp_path)],
+        ["--chat", "--no-save", "--workspace", str(tmp_path)],
         provider=provider,
         input_fn=lambda _: next(inputs),
         output_fn=output.append,
@@ -849,6 +951,7 @@ def test_cli_chat_clear_allows_new_task_after_history_budget_would_be_exceeded(
     exit_code = main(
         [
             "--chat",
+            "--no-save",
             "--workspace",
             str(tmp_path),
             "--read-only",
@@ -899,6 +1002,7 @@ def test_cli_trim_policy_reports_context_diagnostic_without_message_content(
     exit_code = main(
         [
             "--chat",
+            "--no-save",
             "--workspace",
             str(tmp_path),
             "--read-only",
@@ -944,6 +1048,7 @@ def test_cli_trim_policy_reports_when_remaining_context_still_exceeds_budget(
     exit_code = main(
         [
             "--chat",
+            "--no-save",
             "--workspace",
             str(tmp_path),
             "--read-only",
@@ -977,7 +1082,7 @@ def test_cli_chat_eof_and_empty_input_do_not_call_provider(tmp_path: Path) -> No
         raise EOFError
 
     exit_code = main(
-        ["--chat", "--workspace", str(tmp_path)],
+        ["--chat", "--no-save", "--workspace", str(tmp_path)],
         provider=provider,
         input_fn=end_input,
     )
@@ -995,7 +1100,7 @@ def test_cli_chat_abnormal_task_stops_session_without_consuming_next_task(
     errors: list[str] = []
 
     exit_code = main(
-        ["--chat", "--workspace", str(tmp_path)],
+        ["--chat", "--no-save", "--workspace", str(tmp_path)],
         provider=provider,
         input_fn=lambda _: next(inputs),
         error_fn=errors.append,
@@ -1012,7 +1117,7 @@ def test_cli_chat_keyboard_interrupt_while_waiting_returns_130(tmp_path: Path) -
 
     errors: list[str] = []
     exit_code = main(
-        ["--chat", "--workspace", str(tmp_path)],
+        ["--chat", "--no-save", "--workspace", str(tmp_path)],
         provider=FakeProvider([]),
         input_fn=interrupt,
         error_fn=errors.append,

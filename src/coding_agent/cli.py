@@ -77,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="关闭连续任务会话；省略位置任务时只读取一次输入。",
     )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="聊天模式仅保留内存历史，不创建或更新会话存档。",
+    )
     session_group = parser.add_mutually_exclusive_group()
     session_group.add_argument(
         "--session",
@@ -91,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--session-dir",
         metavar="PATH",
-        help="持久会话存档目录（默认：启动目录下 .local/sessions）。需与持久会话参数一起使用。",
+        help="持久会话存档目录（默认：启动目录下 .local/sessions）；聊天模式可单独指定。",
     )
     parser.add_argument(
         "--workspace",
@@ -398,6 +403,7 @@ def _run_chat(
     error_fn: Callable[[str], Any],
     *,
     new_session: Callable[[], AgentSession] | None = None,
+    store: SessionStore | None = None,
     show_stats: bool = False,
 ) -> int:
     """Read tasks until an explicit exit, EOF, interrupt, or abnormal result."""
@@ -436,6 +442,75 @@ def _run_chat(
                         f"会话 ID: {session.session_id}\n"
                         f"存档路径: {session.archive_path}"
                     )
+                continue
+            if task == "/sessions":
+                if store is None:
+                    output_fn("当前为内存会话，暂无可恢复的持久会话。")
+                    continue
+                try:
+                    archives, skipped = store.list_sessions(
+                        workspace_root=session.loop.workspace.root
+                    )
+                except SessionStoreError as exc:
+                    error_fn(f"错误: 无法列出会话: {exc}")
+                    continue
+                for notice in skipped:
+                    output_fn(f"会话提示: {notice}")
+                if not archives:
+                    output_fn("没有可恢复的会话。")
+                    continue
+                output_fn("可恢复会话:")
+                for index, archive in enumerate(archives, start=1):
+                    title = archive.title or "未命名会话"
+                    output_fn(
+                        f"[{index}] {title} | {archive.updated_at.isoformat()} | "
+                        f"{archive.session_id[:8]}"
+                    )
+                try:
+                    selection = input_fn("选择会话编号（回车取消）: ").strip()
+                except EOFError:
+                    selection = ""
+                if not selection:
+                    output_fn("已取消会话切换。")
+                    continue
+                try:
+                    index = int(selection)
+                except ValueError:
+                    error_fn("错误: 会话编号无效。")
+                    continue
+                if index < 1 or index > len(archives):
+                    error_fn("错误: 会话编号超出范围。")
+                    continue
+                target = archives[index - 1]
+                if target.session_id == session.session_id:
+                    output_fn("当前已经是所选会话。")
+                    continue
+                try:
+                    replacement = AgentSession.resume(session.loop, store, target.session_id)
+                except SessionStoreError as exc:
+                    error_fn(f"错误: 无法恢复会话: {exc}")
+                    continue
+                try:
+                    session.close()
+                except SessionStoreError as exc:
+                    with suppress(Exception):
+                        replacement.close()
+                    error_fn(f"错误: 当前会话锁未能释放，未切换: {exc}")
+                    return 2
+                session = replacement
+                output_fn(f"已恢复会话: {session.session_id}\n存档路径: {session.archive_path}")
+                continue
+            if task.startswith("/rename"):
+                title = task[len("/rename") :].strip()
+                if not title:
+                    error_fn("错误: 用法 /rename <标题>。")
+                    continue
+                try:
+                    session.rename(title)
+                except SessionStoreError as exc:
+                    error_fn(f"错误: 无法修改会话标题: {exc}")
+                    continue
+                output_fn(f"会话标题已更新: {session.title}")
                 continue
             if not task:
                 continue
@@ -488,8 +563,11 @@ def main(
         if persistent_requested and not effective_chat:
             report_error("错误: --session 或 --resume 只能与 --chat 一起使用")
             return 2
-        if args.session_dir is not None and not persistent_requested:
-            report_error("错误: --session-dir 必须与 --session 或 --resume 一起使用")
+        if args.session_dir is not None and not effective_chat:
+            report_error("错误: --session-dir 必须与聊天模式一起使用")
+            return 2
+        if args.no_save and (persistent_requested or args.session_dir is not None):
+            report_error("错误: --no-save 不能与持久会话参数一起使用")
             return 2
         effective_allow_write = (
             False if args.read_only else True if args.allow_write is None else args.allow_write
@@ -571,7 +649,7 @@ def main(
             ),
         )
         if effective_chat:
-            if persistent_requested:
+            if not args.no_save:
                 store_root = (
                     Path(args.session_dir)
                     if args.session_dir is not None
@@ -580,8 +658,10 @@ def main(
                 store = SessionStore(store_root)
                 if args.session is not None:
                     session = AgentSession.create(loop, store, args.session)
-                else:
+                elif args.resume is not None:
                     session = AgentSession.resume(loop, store, args.resume)
+                else:
+                    session = AgentSession.create(loop, store, uuid.uuid4().hex)
                 try:
                     output_fn(
                         f"持久会话 ID: {session.session_id}\n存档路径: {session.archive_path}"
@@ -604,6 +684,7 @@ def main(
                     output_fn,
                     report_error,
                     new_session=create_session,
+                    store=store,
                     show_stats=args.show_stats,
                 )
             return _run_chat(
