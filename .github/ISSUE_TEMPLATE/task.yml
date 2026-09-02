@@ -1,0 +1,47 @@
+name: 工程任务
+description: 文档、配置、CI、重构或其他工程任务
+labels:
+  - type:chore
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 这项工程任务要达成什么结果？
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围
+      description: 明确要修改的范围。
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 可验证的完成条件。
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: 非目标
+      description: 明确本任务不处理的内容。
+    validations:
+      required: true
+  - type: input
+    id: dependencies
+    attributes:
+      label: 依赖项
+      description: 依赖的 Issue 或 PR；没有则填“无”。
+      placeholder: "无"
+    validations:
+      required: true
