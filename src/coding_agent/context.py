@@ -11,7 +11,7 @@ from coding_agent.models import Message
 DEFAULT_MAX_CONTEXT_BYTES = 8_388_608
 DEFAULT_MAX_CONTEXT_TOKENS = 524_288
 DEFAULT_TOKEN_BYTES = 4
-ContextPolicy = Literal["stop", "trim"]
+ContextPolicy = Literal["stop", "trim", "compact"]
 
 
 class ContextSerializationError(ValueError):
@@ -167,6 +167,7 @@ class ContextSelectionResult:
     removed_task_count: int = 0
     used_tokens: int = 0
     max_tokens: int | None = None
+    compacted_task_count: int = 0
 
     @property
     def within_budget(self) -> bool:
@@ -189,6 +190,8 @@ def select_context(
     max_context_bytes: int = DEFAULT_MAX_CONTEXT_BYTES,
     max_context_tokens: int | None = DEFAULT_MAX_CONTEXT_TOKENS,
     policy: ContextPolicy = "stop",
+    background_messages: Sequence[Message] = (),
+    compacted_task_count: int = 0,
 ) -> ContextSelectionResult:
     """Select a request context while preserving complete task boundaries.
 
@@ -197,8 +200,15 @@ def select_context(
     until the serialized context fits or no removable task remains. The input
     messages and nested tool-call arguments are never mutated.
     """
-    if policy not in {"stop", "trim"}:
-        raise ValueError("context policy must be 'stop' or 'trim'")
+    if policy not in {"stop", "trim", "compact"}:
+        raise ValueError("context policy must be 'stop', 'trim', or 'compact'")
+    if isinstance(compacted_task_count, bool) or not isinstance(compacted_task_count, int):
+        raise TypeError("compacted_task_count must be an integer")
+    if compacted_task_count < 0:
+        raise ValueError("compacted_task_count must not be negative")
+    for message in background_messages:
+        if message.role == "system":
+            raise ContextHistoryError
     budget = ContextBudget(max_bytes=max_context_bytes)
     if max_context_tokens is not None:
         if isinstance(max_context_tokens, bool) or not isinstance(max_context_tokens, int):
@@ -214,7 +224,23 @@ def select_context(
 
     groups = _completed_task_ranges(messages, current_task_start)
     removed_indices: set[int] = set()
-    selected = list(messages)
+    compacted = min(compacted_task_count, len(groups))
+    for start, end in groups[:compacted]:
+        removed_indices.update(
+            index for index in range(start, end) if messages[index].role != "system"
+        )
+
+    def compose(items: Sequence[Message]) -> list[Message]:
+        if not background_messages:
+            return list(items)
+        prefix_len = 0
+        while prefix_len < len(items) and items[prefix_len].role == "system":
+            prefix_len += 1
+        return [*items[:prefix_len], *background_messages, *items[prefix_len:]]
+
+    selected = compose(
+        [message for index, message in enumerate(messages) if index not in removed_indices]
+    )
     used_bytes = budget.measure(selected, tools)
     used_tokens = estimate_context_tokens(selected, tools)
     removed_task_count = 0
@@ -224,15 +250,15 @@ def select_context(
             max_context_tokens is not None and used_tokens > max_context_tokens
         )
 
-    if policy == "trim" and exceeds():
-        for start, end in groups:
+    if policy in {"trim", "compact"} and exceeds():
+        for start, end in groups[compacted:]:
             removed_indices.update(
                 index for index in range(start, end) if messages[index].role != "system"
             )
             removed_task_count += 1
-            selected = [
-                message for index, message in enumerate(messages) if index not in removed_indices
-            ]
+            selected = compose(
+                [message for index, message in enumerate(messages) if index not in removed_indices]
+            )
             used_bytes = budget.measure(selected, tools)
             used_tokens = estimate_context_tokens(selected, tools)
             if not exceeds():
@@ -245,6 +271,7 @@ def select_context(
         removed_task_count=removed_task_count,
         used_tokens=used_tokens,
         max_tokens=max_context_tokens,
+        compacted_task_count=compacted,
     )
 
 

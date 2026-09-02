@@ -126,7 +126,7 @@ uv run --env-file .env coding-agent --chat --resume demo-chat --session-dir .loc
 | `--max-context-bytes` | `8388608` | 每次请求的上下文 UTF-8 字节预算。 |
 | `--max-context-tokens` | `524288` | 输入 token 的本地粗估预算。 |
 | `--max-output-tokens` | `32768` | 每次模型请求的输出预算。 |
-| `--context-policy` | `trim` | 上下文超限时按完整旧任务裁剪，或用 `stop` 立即停止。 |
+| `--context-policy` | `compact` | 新任务首次请求前尝试有界摘要；失败时按完整旧任务裁剪，也可用 `stop` 立即停止。 |
 | `--show-plan` / `--no-show-plan` | 显示 | 控制伴随工具调用的简短行动说明。 |
 | `--show-tool-events` / `--hide-tool-events` | 显示 | 控制正常工具进度提示；审批、错误和最终答案仍显示。 |
 | `--show-stats` | 关闭 | 显示本次任务的耗时、请求、工具和用量统计。 |
@@ -139,6 +139,9 @@ uv run --env-file .env coding-agent --chat --resume demo-chat --session-dir .loc
 - 真实终端使用 Rich 显示 Markdown 和等待状态；等待状态会在审批或其他用户输入前停止。非 TTY、重定向或显示失败时安全降级为纯文本，终端控制字符不会被当作格式化指令。
 - 文件工具拒绝越界路径、符号链接、junction/reparse point、`.git`、`.local`、`.venv` 和真实 `.env`，并且不提供删除文件操作。
 - 本地命令以当前用户权限运行。路径检查、审批、资源预算和进程清理不是操作系统级沙箱，已批准的程序仍可能访问该用户有权访问的其他资源。
-- 持久会话保存完整历史，不保存 API Key 或运行时配置；恢复后的工具结果可能过时，涉及当前文件时应重新读取核验。当前不支持跨设备同步、摘要压缩或中断续跑。
+- 持久会话保存完整历史，不保存 API Key 或运行时配置；恢复后的工具结果可能过时，涉及当前文件时应重新读取核验。当前不支持跨设备同步或中断续跑；`compact` 摘要仅用于请求上下文。
 
 自动测试使用 `FakeProvider`、模拟 HTTP 和临时目录，不调用真实 DeepSeek API。更多工具协议、文档读取、会话和安全限制见 [`docs/cli.md`](docs/cli.md) 与 [`docs/architecture.md`](docs/architecture.md)。
+## 上下文摘要
+
+默认 `--context-policy compact` 会在新任务首次请求前，最多为较早的已完成任务生成一次有界摘要。摘要请求不携带工具、不计入主任务步数，且只作为明确标记的 user 背景消息使用；完整历史始终保留。聊天模式可输入 `/compact` 手动触发，摘要失败时回退现有 `trim`/`stop` 策略。持久会话会保存有效摘要，`/clear` 会清空摘要状态。

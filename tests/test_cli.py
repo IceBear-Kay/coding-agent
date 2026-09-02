@@ -894,8 +894,9 @@ def test_cli_parser_accepts_context_budget() -> None:
     assert args.max_context_bytes == 4096
 
 
-def test_cli_parser_context_policy_defaults_to_trim_and_accepts_stop() -> None:
-    assert build_parser().parse_args([]).context_policy == "trim"
+def test_cli_parser_context_policy_defaults_to_compact_and_accepts_existing_modes() -> None:
+    assert build_parser().parse_args([]).context_policy == "compact"
+    assert build_parser().parse_args(["--context-policy", "compact"]).context_policy == "compact"
     assert build_parser().parse_args(["--context-policy", "trim"]).context_policy == "trim"
 
     with pytest.raises(SystemExit) as exc_info:

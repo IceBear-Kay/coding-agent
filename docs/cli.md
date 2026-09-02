@@ -71,7 +71,7 @@ uv run --env-file .env coding-agent --chat --resume demo-chat --session-dir .loc
 - `--max-context-bytes`：每次 Provider 请求前的上下文 UTF-8 字节预算，默认 8388608；必须为正整数，超限时按 `--context-policy` 处理。
 - `--max-context-tokens`：每次请求输入 token 的本地粗估预算，默认 524288；不等同于精确 tokenizer 计数。
 - `--max-output-tokens`：每次模型请求的 `max_tokens` 上限，默认 32768；V4 Flash/Pro 的模型能力上限为 384000。
-- `--context-policy`：上下文超预算时的策略，默认 `trim`；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。
+- `--context-policy`：上下文超预算时的策略，默认 `compact`；`compact` 在新任务首次请求前尝试一次有界摘要，失败时回退到完整任务裁剪；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。
 - `--command-timeout`：命令超时上限，默认 20 秒，最大 60 秒。
 - `--command-output-limit`：stdout 和 stderr 共享的输出字节上限，默认 65536。
 
@@ -154,11 +154,11 @@ uv run --env-file .env coding-agent "请创建 solution.py，读取两个整数�
 
 真实 TTY 会使用 Rich 显示 Markdown 答案和模型处理状态；非 TTY、输出重定向或 Rich 不可用时保持纯文本输出，不写入动画控制字符。用户内容中的终端控制字符不会被当作 Rich 标记执行。
 
-正常完成任务的历史会继续计入 `--max-context-bytes`；默认策略下，如果累积历史或工具结果使下一次请求超限，任务以 `context_limit` 停止；使用 `--context-policy trim` 时，会先移除最早的完整任务，仍超限才停止。已完成的工具结果仍保留在本次状态中。`/clear` 清空内存历史后，后续任务只按新的消息和工具 Schema 检查预算。
+正常完成任务的历史会继续计入 `--max-context-bytes`；默认 `compact` 策略会在新任务首次请求前尝试一次有界摘要，失败后回退到完整任务裁剪，仍超限才以 `context_limit` 停止；使用 `--context-policy trim` 时，会先移除最早的完整任务。已完成的工具结果仍保留在本次状态中。`/clear` 清空内存历史和摘要状态后，后续任务只按新的消息和工具 Schema 检查预算。
 
 只有停止原因为 `completed` 的任务会提交到会话历史。`max_steps`、Provider 错误、`length`、`content_filter`、`insufficient_system_resource` 或 `Ctrl+C` 会结束整个会话，不继续读取下一任务，也不会把不完整的工具调用序列用于后续请求。已经完成的工具操作及其真实结果不会回滚或伪造，尚未执行的工具不会继续执行。
 
-`/clear` 清空内存历史，但保留工作区、Provider 配置、工具开关和命令资源限制，不删除任何文件。会话不会写入磁盘，退出进程后不能恢复；当前不提供摘要压缩、保存或中断续跑，历史裁剪仅由显式的 `--context-policy trim` 控制。
+`/clear` 清空内存历史和摘要状态，但保留工作区、Provider 配置、工具开关和命令资源限制，不删除任何文件。`/compact` 只在 `compact` 策略下生成摘要；持久会话保存摘要记录，`--no-save` 退出后丢弃摘要。当前不支持中断续跑。
 
 ## Provider 配置
 
@@ -215,3 +215,8 @@ uv run --env-file .env coding-agent "请读取 docs/architecture.md 并列出 Ag
 预期结果是模型先请求 `read_file`，程序在本地读取该文件并将结果回传，随后模型输出最终回答；若模型直接回答，则不会产生工具消息。达到 `max_steps`、网络失败或按下 `Ctrl+C` 时，CLI 应显示对应停止原因并返回非零退出码。
 
 真实写入或命令验证必须由用户明确决定，并增加对应的 `--allow-write` 或 `--allow-exec`。这会调用真实模型并产生 API 费用；在审批提示出现后，应先核对完整预览，再决定是否输入 `y`，不确认时直接按回车即可拒绝。自动测试使用 `FakeProvider`、无害的短 Python 进程和临时目录，不需要真实 API，也不会产生模型费用。
+## M6-D 上下文摘要
+
+`--context-policy` 默认值为 `compact`。新任务开始、首次主模型请求前，程序最多尝试一次有界摘要；摘要请求不携带工具、不会增加主任务步数，也不执行任何工具。摘要仅作为明确标记的 user 背景消息加入后续请求，完整消息历史始终保留。
+
+聊天模式可输入 `/compact` 手动触发摘要；该命令不新增任务，只有存在足够的较早已完成任务时才会调用 Provider。摘要失败、保存失败或压缩后未变小时，自动回退现有 `trim`/`stop` 行为。持久会话会保存摘要记录，旧存档仍可加载；`/clear` 会同时清空摘要状态。

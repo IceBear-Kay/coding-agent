@@ -27,6 +27,17 @@ from coding_agent.command_tools import (
     RunCommandArguments,
     run_command_tool_spec,
 )
+from coding_agent.compaction import (
+    COMPACTION_AUTO_THRESHOLD,
+    COMPACTION_MARKER,
+    COMPACTION_MAX_INPUT_TOKENS,
+    COMPACTION_MAX_OUTPUT_TOKENS,
+    COMPACTION_RECENT_TASKS,
+    COMPACTION_TIMEOUT_SECONDS,
+    CompactionResult,
+    compact_history,
+    compaction_prefix_matches,
+)
 from coding_agent.config import (
     MODEL_CAPABILITIES,
     ModelCapability,
@@ -75,6 +86,7 @@ from coding_agent.file_tools import (
 )
 from coding_agent.models import (
     AgentState,
+    CompactionRecord,
     Message,
     ModelResponse,
     SessionState,
@@ -134,6 +146,16 @@ __all__ = [
     "AgentState",
     "AgentLoop",
     "AgentRunResult",
+    "CompactionRecord",
+    "CompactionResult",
+    "compact_history",
+    "compaction_prefix_matches",
+    "COMPACTION_AUTO_THRESHOLD",
+    "COMPACTION_MARKER",
+    "COMPACTION_MAX_INPUT_TOKENS",
+    "COMPACTION_MAX_OUTPUT_TOKENS",
+    "COMPACTION_RECENT_TASKS",
+    "COMPACTION_TIMEOUT_SECONDS",
     "AgentSession",
     "SESSION_SAVE_ERROR_STOP_REASON",
     "SESSION_LOCK_ERROR_STOP_REASON",
