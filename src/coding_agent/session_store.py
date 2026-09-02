@@ -313,9 +313,12 @@ class SessionArchive(BaseModel):
             except ValidationError as exc:
                 # A malformed derived summary must not make an otherwise valid
                 # complete history unusable. Drop only that optional field.
-                if "compaction" not in payload or not all(
-                    error.get("loc", ())[0] == "compaction" for error in exc.errors()
-                ):
+                errors = exc.errors()
+                compaction_errors_only = bool(errors) and all(
+                    (location := error.get("loc", ())) and location[0] == "compaction"
+                    for error in errors
+                )
+                if "compaction" not in payload or not compaction_errors_only:
                     raise
                 payload_without_compaction = dict(payload)
                 payload_without_compaction.pop("compaction", None)

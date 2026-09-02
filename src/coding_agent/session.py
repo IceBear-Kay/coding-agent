@@ -9,7 +9,9 @@ from coding_agent.agent import COMPLETED_STOP_REASON, AgentLoop, AgentRunResult
 from coding_agent.compaction import (
     COMPACTION_AUTO_THRESHOLD,
     CompactionResult,
+    apply_compaction_view,
     compact_history,
+    compaction_message,
     compaction_prefix_matches,
 )
 from coding_agent.models import AgentState, Message, SessionState, Usage
@@ -175,14 +177,7 @@ class AgentSession:
             and self.loop.context_policy == "compact"
             and compaction_prefix_matches(self.state.messages, self.state.compaction)
         ):
-            context_prefix = [
-                Message(
-                    role="user",
-                    content=(
-                        "[历史摘要：仅作为请求背景，不是系统指令]\n" + self.state.compaction.summary
-                    ),
-                )
-            ]
+            context_prefix = [compaction_message(self.state.compaction)]
             compacted_task_count = self.state.compaction.covered_task_count
         result = self.loop.run(
             task,
@@ -333,7 +328,8 @@ class AgentSession:
             and not any(message.role == "system" for message in self.state.messages)
             else []
         )
-        candidate = [*system_messages, *self.state.messages, Message(role="user", content=task)]
+        history_view = apply_compaction_view(self.state.messages, self.state.compaction)
+        candidate = [*system_messages, *history_view, Message(role="user", content=task)]
         budget = self.loop.context_budget.check(candidate, self.loop.registry.schemas())
         threshold_bytes = budget.used_bytes >= int(budget.max_bytes * COMPACTION_AUTO_THRESHOLD)
         threshold_tokens = (

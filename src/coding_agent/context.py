@@ -264,6 +264,23 @@ def select_context(
             if not exceeds():
                 break
 
+    # A derived summary is optional. If it is the only reason the request is
+    # over budget, drop it and continue with the retained complete history.
+    if background_messages and exceeds():
+        background_ids = {id(message) for message in background_messages}
+        selected_without_background = [
+            message for message in selected if id(message) not in background_ids
+        ]
+        without_bytes = budget.measure(selected_without_background, tools)
+        without_tokens = estimate_context_tokens(selected_without_background, tools)
+        if without_bytes <= budget.max_bytes and (
+            max_context_tokens is None or without_tokens <= max_context_tokens
+        ):
+            selected = selected_without_background
+            used_bytes = without_bytes
+            used_tokens = without_tokens
+            compacted = 0
+
     return ContextSelectionResult(
         messages=tuple(message.model_copy(deep=True) for message in selected),
         used_bytes=used_bytes,

@@ -126,14 +126,15 @@ def test_auto_compaction_runs_once_before_new_task_when_budget_reaches_threshold
 ) -> None:
     provider = FakeProvider(
         [
-            ModelResponse(text="a" * 120, finish_reason="stop"),
-            ModelResponse(text="b" * 120, finish_reason="stop"),
-            ModelResponse(text="c" * 120, finish_reason="stop"),
+            ModelResponse(text="a" * 500, finish_reason="stop"),
+            ModelResponse(text="b" * 500, finish_reason="stop"),
+            ModelResponse(text="c" * 500, finish_reason="stop"),
             ModelResponse(
                 text="目标：x；关键决定：y；已完成及证据：z；待办：无；文件路径：无",
                 finish_reason="stop",
             ),
             ModelResponse(text="d", finish_reason="stop"),
+            ModelResponse(text="e", finish_reason="stop"),
         ]
     )
     session = AgentSession(
@@ -141,7 +142,7 @@ def test_auto_compaction_runs_once_before_new_task_when_budget_reaches_threshold
             provider,
             Workspace(tmp_path),
             context_policy="compact",
-            max_context_bytes=1500,
+            max_context_bytes=3500,
             max_context_tokens=1000,
         )
     )
@@ -154,3 +155,39 @@ def test_auto_compaction_runs_once_before_new_task_when_budget_reaches_threshold
         message.content and COMPACTION_MARKER in message.content
         for message in provider.requests[-1][0]
     )
+    assert session.run("five").stop_reason == "completed"
+    assert session.compaction_stats.provider_attempts == 1
+
+
+def test_compaction_compares_against_existing_compressed_view() -> None:
+    history = _history(7)
+    first_provider = FakeProvider(
+        [
+            ModelResponse(
+                text="目标：x；关键决定：y；已完成及证据：z；待办：无；文件路径：无",
+                finish_reason="stop",
+            )
+        ]
+    )
+    first = compact_history(first_provider, history)
+    assert first.success and first.record is not None
+    history.extend(
+        [
+            Message(role="user", content="new task"),
+            Message(role="assistant", content="new answer"),
+        ]
+    )
+    second_provider = FakeProvider(
+        [
+            ModelResponse(
+                text=(
+                    "目标与约束：" + "很长" * 2000 + "；关键决定：x；"
+                    "已完成事项及证据：y；待办：无；文件路径：无"
+                ),
+                finish_reason="stop",
+            )
+        ]
+    )
+    second = compact_history(second_provider, history, previous=first.record)
+    assert not second.success
+    assert second.reason == "summary_not_smaller"

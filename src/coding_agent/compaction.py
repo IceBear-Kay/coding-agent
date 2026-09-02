@@ -143,6 +143,32 @@ def compaction_prefix_matches(messages: Sequence[Message], record: CompactionRec
     )
 
 
+def compaction_message(record: CompactionRecord) -> Message:
+    """Build the explicitly marked user-level background message."""
+    return Message(role="user", content=f"{COMPACTION_MARKER}\n{record.summary}")
+
+
+def apply_compaction_view(
+    messages: Sequence[Message], record: CompactionRecord | None
+) -> list[Message]:
+    """Return a request view with a valid summary replacing its covered prefix."""
+    if record is None or not compaction_prefix_matches(messages, record):
+        return [message.model_copy(deep=True) for message in messages]
+    ranges = completed_task_ranges(messages)
+    covered = {
+        index for start, end in ranges[: record.covered_task_count] for index in range(start, end)
+    }
+    retained = [message for index, message in enumerate(messages) if index not in covered]
+    prefix_len = 0
+    while prefix_len < len(retained) and retained[prefix_len].role == "system":
+        prefix_len += 1
+    return [
+        *retained[:prefix_len],
+        compaction_message(record),
+        *retained[prefix_len:],
+    ]
+
+
 def _call_provider(
     provider: ModelProvider,
     messages: Sequence[Message],
@@ -179,7 +205,8 @@ def compact_history(
         ranges = completed_task_ranges(messages)
     except ContextHistoryError:
         return CompactionResult(False, reason="history_invalid")
-    before_bytes = len(serialize_context(messages, tool_schemas))
+    before_messages = apply_compaction_view(messages, previous)
+    before_bytes = len(serialize_context(before_messages, tool_schemas))
     material = _select_material(
         messages,
         ranges,
@@ -250,14 +277,9 @@ def compact_history(
         )
     except Exception:
         return CompactionResult(False, reason="summary_invalid", before_bytes=before_bytes)
-    # The marker is the only representation inserted into future request views.
-    summary_message = Message(role="user", content=f"{COMPACTION_MARKER}\n{record.summary}")
-    retained = [
-        message
-        for index, message in enumerate(messages)
-        if not any(start <= index < end for start, end in ranges[:covered_count])
-    ]
-    after_bytes = len(serialize_context([summary_message, *retained], tool_schemas))
+    # Measure the same request view used by the loop, including system-prefix
+    # placement and any previously retained messages.
+    after_bytes = len(serialize_context(apply_compaction_view(messages, record), tool_schemas))
     if after_bytes >= before_bytes:
         return CompactionResult(
             False,
@@ -290,6 +312,8 @@ __all__ = [
     "COMPACTION_TIMEOUT_SECONDS",
     "CompactionResult",
     "compact_history",
+    "apply_compaction_view",
+    "compaction_message",
     "compaction_prefix_matches",
     "completed_task_ranges",
 ]

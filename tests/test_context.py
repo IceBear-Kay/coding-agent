@@ -386,3 +386,29 @@ def test_select_context_trim_applies_token_budget_independently_of_bytes() -> No
     assert result.messages == (messages[-1],)
     assert result.used_tokens <= current_tokens
     assert result.removed_task_count == 1
+
+
+def test_select_context_can_drop_compaction_background_when_it_is_the_only_overage() -> None:
+    history = [
+        Message(role="user", content="old task"),
+        Message(role="assistant", content="old answer"),
+        Message(role="user", content="current task"),
+    ]
+    background = [Message(role="user", content="[历史摘要]\n" + "x" * 500)]
+    current_only = [history[-1]]
+    budget = measure_context_bytes(current_only, []) + 20
+
+    result = select_context(
+        history,
+        [],
+        current_task_start=2,
+        max_context_bytes=budget,
+        max_context_tokens=DEFAULT_MAX_CONTEXT_TOKENS,
+        policy="compact",
+        background_messages=background,
+        compacted_task_count=1,
+    )
+
+    assert result.within_budget
+    assert all(message.content != background[0].content for message in result.messages)
+    assert result.compacted_task_count == 0
