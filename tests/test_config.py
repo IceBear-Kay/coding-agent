@@ -75,5 +75,25 @@ def test_startup_dotenv_is_loaded_with_process_environment_precedence(
 
     assert values["DEEPSEEK_API_KEY"] == "process-key"
     assert values["DEEPSEEK_BASE_URL"] == "https://file.example"
-    assert model_capability("deepseek-v4-pro").context_window_tokens == 1_000_000
+    capability = model_capability("deepseek-v4-pro")
+    assert capability is not None
+    assert capability.context_window_tokens == 1_000_000
+    assert capability.max_output_tokens == 384_000
     assert model_capability("unknown-model") is None
+
+
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
+def test_v4_model_capabilities_match_documented_limits(model: str) -> None:
+    capability = model_capability(model)
+
+    assert capability is not None
+    assert capability.context_window_tokens == 1_000_000
+    assert capability.max_output_tokens == 384_000
+
+
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
+def test_v4_models_allow_65536_output_override(model: str) -> None:
+    capability = model_capability(model)
+
+    assert capability is not None
+    assert capability.max_output_tokens >= 65_536

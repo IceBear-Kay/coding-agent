@@ -127,8 +127,12 @@ class AgentLoop:
                 raise TypeError("model_window_tokens must be an integer")
             if model_window_tokens <= 0:
                 raise ValueError("model_window_tokens must be greater than zero")
-            if max_output_tokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS >= model_window_tokens:
-                raise ValueError("max_output_tokens leaves no model context budget")
+            if (
+                max_output_tokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS >= model_window_tokens
+                or max_context_tokens + max_output_tokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS
+                > model_window_tokens
+            ):
+                raise ValueError("configured context and output budgets exceed model window")
         if retry_delay_seconds < 0:
             raise ValueError("retry_delay_seconds must not be negative")
         if system_prompt is not None and not system_prompt.strip():
@@ -145,14 +149,7 @@ class AgentLoop:
         self.max_context_tokens = max_context_tokens
         self.max_output_tokens = max_output_tokens
         self.model_window_tokens = model_window_tokens
-        self.effective_context_tokens = (
-            min(
-                max_context_tokens,
-                model_window_tokens - max_output_tokens - DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS,
-            )
-            if model_window_tokens is not None
-            else max_context_tokens
-        )
+        self.effective_context_tokens = max_context_tokens
         self.context_budget = ContextBudget(
             max_bytes=max_context_bytes,
             max_tokens=self.effective_context_tokens,

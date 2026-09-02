@@ -217,7 +217,7 @@ uv run coding-agent --help
 | `--max-retries` | `2` | 每个任务中单次临时 Provider 错误的最大重试次数，必须为非负整数；设为 `0` 关闭自动重试。 |
 | `--max-context-bytes` | `8388608` | 每次 Provider 请求前的上下文 UTF-8 字节预算，必须为正整数；超限时按 `--context-policy` 处理。 |
 | `--max-context-tokens` | `524288` | 每次请求输入 token 的本地粗估预算；不是精确 tokenizer 计数。 |
-| `--max-output-tokens` | `32768` | 每次模型请求传入的 `max_tokens` 上限；受已知模型能力约束。 |
+| `--max-output-tokens` | `32768` | 每次模型请求传入的 `max_tokens` 上限；V4 Flash/Pro 的模型能力上限为 `384000`。 |
 | `--context-policy` | `trim` | 上下文超预算时的策略；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。 |
 
 `--max-steps` 统计模型请求次数；一次模型响应可以包含多个工具调用，这些调用按模型给出的顺序处理。在 `--chat` 模式中，每个新任务都会重新计算 `--max-steps` 和重试预算。写入和执行工具仍按调用逐次审批。`DEEPSEEK_TIMEOUT_SECONDS` 控制 API 网络请求，与 `--command-timeout` 控制的本地子进程超时无关。

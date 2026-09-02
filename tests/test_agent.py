@@ -118,26 +118,41 @@ def test_agent_loop_runs_tool_then_returns_final_answer(tmp_path: Path) -> None:
     assert provider.max_tokens == [32_768, 32_768]
 
 
-def test_agent_loop_derives_effective_input_budget_from_model_window(tmp_path: Path) -> None:
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
+def test_agent_loop_accepts_65536_output_budget_with_v4_window(tmp_path: Path, model: str) -> None:
     provider = FakeProvider([ModelResponse(text="Done", finish_reason="stop")])
     loop = AgentLoop(
         provider,
         Workspace(tmp_path),
-        max_context_tokens=90_000,
-        max_output_tokens=20_000,
-        model_window_tokens=100_000,
+        max_context_tokens=524_288,
+        max_output_tokens=65_536,
+        model_window_tokens=1_000_000,
     )
 
-    assert loop.effective_context_tokens == 63_616
+    assert loop.effective_context_tokens == 524_288
+    result = loop.run(f"Use {model}")
+    assert result.stop_reason == "completed"
+    assert provider.max_tokens == [65_536]
 
 
 def test_agent_loop_rejects_output_budget_that_exhausts_model_window(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="leaves no model context budget"):
+    with pytest.raises(ValueError, match="exceed model window"):
         AgentLoop(
             FakeProvider([]),
             Workspace(tmp_path),
             max_output_tokens=90_000,
             model_window_tokens=100_000,
+        )
+
+
+def test_agent_loop_rejects_context_and_output_budget_over_total_window(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="exceed model window"):
+        AgentLoop(
+            FakeProvider([]),
+            Workspace(tmp_path),
+            max_context_tokens=930_000,
+            max_output_tokens=65_536,
+            model_window_tokens=1_000_000,
         )
 
 

@@ -587,6 +587,38 @@ def test_cli_parser_exposes_runtime_budget_defaults() -> None:
     assert args.max_context_bytes == 8_388_608
 
 
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
+def test_cli_accepts_v4_output_override_and_rejects_over_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: str
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://api.example.com")
+    monkeypatch.setenv("DEEPSEEK_MODEL", model)
+    monkeypatch.setenv("DEEPSEEK_TIMEOUT_SECONDS", "30")
+
+    provider = FakeProvider([ModelResponse(text="ok", finish_reason="stop")])
+    assert (
+        main(
+            ["hello", "--workspace", str(tmp_path), "--max-output-tokens", "65536"],
+            provider=provider,
+        )
+        == 0
+    )
+    assert provider.max_tokens == [65_536]
+
+    errors: list[str] = []
+    assert (
+        main(
+            ["hello", "--workspace", str(tmp_path), "--max-output-tokens", "384001"],
+            provider=None,
+            error_fn=errors.append,
+        )
+        == 2
+    )
+    assert errors and "max-output-tokens" in errors[0]
+
+
 def test_cli_rejects_non_positive_context_budget_before_provider_call(tmp_path: Path) -> None:
     provider = FakeProvider([])
     errors: list[str] = []

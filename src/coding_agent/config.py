@@ -28,8 +28,8 @@ class ModelCapability:
 
 
 MODEL_CAPABILITIES: dict[str, ModelCapability] = {
-    "deepseek-v4-flash": ModelCapability(1_000_000, 32_768),
-    "deepseek-v4-pro": ModelCapability(1_000_000, 32_768),
+    "deepseek-v4-flash": ModelCapability(1_000_000, 384_000),
+    "deepseek-v4-pro": ModelCapability(1_000_000, 384_000),
 }
 
 

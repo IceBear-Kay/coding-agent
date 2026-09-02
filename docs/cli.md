@@ -64,7 +64,7 @@ uv run --env-file .env coding-agent --chat --resume demo-chat --session-dir .loc
 - `--max-retries`：每个任务中单次临时 Provider 错误最多重试次数，默认 2；设为 0 可关闭自动重试。
 - `--max-context-bytes`：每次 Provider 请求前的上下文 UTF-8 字节预算，默认 8388608；必须为正整数，超限时按 `--context-policy` 处理。
 - `--max-context-tokens`：每次请求输入 token 的本地粗估预算，默认 524288；不等同于精确 tokenizer 计数。
-- `--max-output-tokens`：每次模型请求的 `max_tokens` 上限，默认 32768；受已知模型能力约束。
+- `--max-output-tokens`：每次模型请求的 `max_tokens` 上限，默认 32768；V4 Flash/Pro 的模型能力上限为 384000。
 - `--context-policy`：上下文超预算时的策略，默认 `trim`；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。
 - `--command-timeout`：命令超时上限，默认 20 秒，最大 60 秒。
 - `--command-output-limit`：stdout 和 stderr 共享的输出字节上限，默认 65536。
