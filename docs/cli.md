@@ -30,6 +30,8 @@ uv run --env-file .env coding-agent --chat --workspace . --max-steps 8
 
 进入会话后，普通非空文本会启动一个新任务；`/sessions` 列出并选择会话，`/rename <标题>` 修改当前会话标题，`/clear` 清空或切换会话，`/exit` 正常退出。空输入不调用 Provider，等待任务时收到 EOF 也会正常退出。聊天默认持久化，使用 `--no-save` 可切换为仅内存模式。
 
+输入提示统一为“输入指令：”。`/help` 会显示会话命令。默认显示模型伴随工具调用返回的简短行动说明；`--no-show-plan` 只隐藏这些中间说明，不改变 Provider 请求、工具分发、审批、历史或最终答案。真实交互终端的等待状态会在审批或其他用户输入前停止；Rich 初始化或显示失败时降级为纯文本，审批显示失败则拒绝操作。工具过程可继续用 `--hide-tool-events` 独立隐藏。
+
 ## 持久聊天会话
 
 使用 `--session ID` 创建持久会话，使用 `--resume ID` 恢复已有会话；两者互斥，且必须处于聊天模式（显式使用 `--chat` 或省略位置任务进入默认聊天）。`--session-dir PATH` 指定 JSON 存档目录，省略时默认为启动目录下的 `.local/sessions`；聊天模式可以单独指定。位置任务不能与持久会话参数同时使用。
@@ -54,6 +56,7 @@ uv run --env-file .env coding-agent --chat --resume demo-chat --session-dir .loc
 - `task`：一次任务的文本；提供后执行一次，省略时默认进入聊天。
 - `--chat` / `--no-chat`：显式开启或关闭连续任务会话；两者互斥，`--chat` 不能与位置任务同时使用。
 - `--no-save`：聊天模式不创建或更新持久会话存档；不能与 `--session`、`--resume` 或 `--session-dir` 同时使用。
+- `--show-plan` / `--no-show-plan`：默认显示或隐藏模型伴随工具调用的简短行动说明；不渲染 `reasoning_content`，不影响最终答案和执行行为。
 - `--session ID`：创建指定 ID 的持久聊天会话；需处于聊天模式（可省略 `--chat`），不能与位置任务同时使用。
 - `--resume ID`：恢复指定 ID 的持久聊天会话；需处于聊天模式（可省略 `--chat`），不能与位置任务同时使用。
 - `--session-dir PATH`：持久会话 JSON 存档目录；默认是启动目录下 `.local/sessions`，聊天模式可以单独指定。
@@ -148,6 +151,8 @@ uv run --env-file .env coding-agent "请创建 solution.py，读取两个整数�
 ## 连续任务会话
 
 `--chat` 使用一份内存中的权威消息历史，并在持久模式下于每个任务完成后保存到 JSON 存档。每个新任务创建独立的任务状态，因此 Provider 调用次数和临时错误重试预算都会从零开始；模型请求仍能看到此前正常完成任务的 `system`、`user`、`assistant` 和 `tool` 消息，包括原始 `tool_call_id` 与必要的 `reasoning_content`。系统消息不会在每个任务前重复添加。
+
+真实 TTY 会使用 Rich 显示 Markdown 答案和模型处理状态；非 TTY、输出重定向或 Rich 不可用时保持纯文本输出，不写入动画控制字符。用户内容中的终端控制字符不会被当作 Rich 标记执行。
 
 正常完成任务的历史会继续计入 `--max-context-bytes`；默认策略下，如果累积历史或工具结果使下一次请求超限，任务以 `context_limit` 停止；使用 `--context-policy trim` 时，会先移除最早的完整任务，仍超限才停止。已完成的工具结果仍保留在本次状态中。`/clear` 清空内存历史后，后续任务只按新的消息和工具 Schema 检查预算。
 

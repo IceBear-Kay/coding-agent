@@ -15,7 +15,6 @@ from coding_agent.agent import (
     DEFAULT_MAX_CONTEXT_TOKENS,
     DEFAULT_MAX_OUTPUT_TOKENS,
     DEFAULT_MAX_STEPS,
-    DEFAULT_SYSTEM_PROMPT,
     AgentEvent,
     AgentLoop,
     AgentRunResult,
@@ -34,12 +33,14 @@ from coding_agent.config import (
 from coding_agent.errors import ProviderConfigurationError, ProviderError
 from coding_agent.file_tools import create_workspace_registry
 from coding_agent.models import ToolResult
+from coding_agent.prompts import DEFAULT_SYSTEM_PROMPT
 from coding_agent.provider import ModelProvider, OpenAICompatibleProvider
 from coding_agent.session import AgentSession
 from coding_agent.session_store import SessionStore, SessionStoreError
 from coding_agent.tools import Workspace
 
 _STRUCTURED_RESULT_TOOLS = frozenset({"write_file", "edit_file", "run_command", "read_document"})
+_ACTIVE_STATUS_STOPPER: Callable[[], Any] | None = None
 
 
 def _positive_int(value: str) -> int:
@@ -151,6 +152,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="隐藏正常工具调用和结果提示；审批、错误和最终回答仍显示。",
     )
+    plan_group = parser.add_mutually_exclusive_group()
+    plan_group.add_argument(
+        "--show-plan",
+        dest="show_plan",
+        action="store_true",
+        default=None,
+        help="显示模型给出的简短行动说明（默认）。",
+    )
+    plan_group.add_argument(
+        "--no-show-plan",
+        dest="show_plan",
+        action="store_false",
+        help="隐藏模型的中间行动说明，不影响最终答案、工具和审批。",
+    )
     parser.add_argument(
         "--show-stats",
         action="store_true",
@@ -238,7 +253,7 @@ def _report_result(
     show_stats: bool = False,
 ) -> int:
     if result.answer is not None:
-        output_fn(result.answer)
+        _render_answer(result.answer, output_fn)
 
     if result.state.context_trimmed_tasks:
         if result.stop_reason == "context_limit":
@@ -255,7 +270,8 @@ def _report_result(
         output_fn(_format_stats(result))
 
     if result.stop_reason == COMPLETED_STOP_REASON:
-        output_fn(f"停止原因: {result.stop_reason}")
+        if output_fn is not print:
+            output_fn(f"停止原因: {result.stop_reason}")
         return 0
 
     error_text = str(result.error) if result.error is not None else ""
@@ -301,15 +317,21 @@ def _report_event(
     output_fn: Callable[[str], Any],
     *,
     show_tool_events: bool = True,
+    show_plan: bool = True,
 ) -> None:
     """Render only concise facts from real tool calls and structured results."""
+    if event.kind == "assistant" and event.assistant_text is not None:
+        if show_plan:
+            _render_answer(event.assistant_text, output_fn)
+        return
+
     if event.kind == "tool_call" and event.tool_call is not None:
         if not show_tool_events:
             return
         tool_call = event.tool_call
         details = _tool_call_summary(tool_call.name, tool_call.arguments)
         suffix = f"，{details}" if details else ""
-        output_fn(f"工具调用: {tool_call.name} ({tool_call.id}){suffix}")
+        _emit_display(output_fn, f"工具调用: {tool_call.name} ({tool_call.id}){suffix}")
         return
 
     if event.kind == "tool_result" and event.tool_result is not None:
@@ -320,7 +342,10 @@ def _report_event(
         detail_text = f"，{details}" if details else ""
         error_text = "，错误" if result.is_error else ""
         tool_name = f" {event.tool_name}" if event.tool_name else ""
-        output_fn(f"工具结果{tool_name}: {status or '已返回'}{error_text}{detail_text}")
+        _emit_display(
+            output_fn,
+            f"工具结果{tool_name}: {status or '已返回'}{error_text}{detail_text}",
+        )
 
 
 def _tool_result_requires_notice(tool_name: str | None, result: ToolResult) -> bool:
@@ -374,18 +399,24 @@ def _prompt_for_approval(
     input_fn: Callable[[str], str],
     output_fn: Callable[[str], Any],
 ) -> bool:
-    output_fn(f"待审批操作: {request.operation}\n{request.preview}")
+    _stop_active_status()
+    try:
+        output_fn(_sanitize_terminal_text(f"待审批操作: {request.operation}\n{request.preview}"))
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        return False
     if input_fn is input and not _stdin_is_interactive():
-        output_fn("审批结果: 已拒绝（非交互输入不能用于审批）")
+        _emit_display(output_fn, "审批结果: 已拒绝（非交互输入不能用于审批）")
         return False
     try:
         answer = input_fn("批准本次操作？[y/N]: ")
     except EOFError:
-        output_fn("审批结果: 已拒绝（无法读取输入）")
+        _emit_display(output_fn, "审批结果: 已拒绝（无法读取输入）")
         return False
 
     approved = answer.strip().casefold() in {"y", "yes"}
-    output_fn("审批结果: 已批准" if approved else "审批结果: 已拒绝")
+    _emit_display(output_fn, "审批结果: 已批准" if approved else "审批结果: 已拒绝")
     return approved
 
 
@@ -396,6 +427,127 @@ def _stdin_is_interactive() -> bool:
         return False
 
 
+def _interactive_output_enabled(output_fn: Callable[[str], Any]) -> bool:
+    try:
+        return output_fn is print and _stdin_is_interactive() and sys.stdout.isatty()
+    except (AttributeError, OSError):
+        return False
+
+
+def _render_answer(answer: str, output_fn: Callable[[str], Any]) -> None:
+    """Render Markdown only for a real terminal; preserve plain redirected output."""
+    answer = _sanitize_terminal_text(answer)
+    if not _interactive_output_enabled(output_fn):
+        _emit_display(output_fn, answer)
+        return
+    try:
+        from rich.console import Console
+        from rich.markdown import Markdown
+
+        Console().print(Markdown(answer))
+    except Exception:
+        _emit_display(output_fn, answer)
+
+
+def _emit_display(output_fn: Callable[[str], Any], text: str) -> None:
+    """Keep ordinary display failures from changing execution semantics."""
+    safe_text = _sanitize_terminal_text(text)
+    try:
+        output_fn(safe_text)
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        with suppress(Exception):
+            print(safe_text)
+
+
+def _sanitize_terminal_text(text: str) -> str:
+    """Remove terminal control characters while preserving normal whitespace."""
+    return "".join(
+        character for character in text if character in {"\n", "\r", "\t"} or ord(character) >= 0x20
+    )
+
+
+def _show_startup_header(
+    output_fn: Callable[[str], Any],
+    *,
+    model: str,
+    workspace: Workspace,
+    session: AgentSession | None = None,
+) -> None:
+    if not _interactive_output_enabled(output_fn):
+        return
+    session_label = session.title if session and session.title else "新会话"
+    _emit_display(
+        output_fn,
+        f"coding-agent | 模型: {model} | 工作区: {workspace.root} | 会话: {session_label}",
+    )
+    _emit_display(output_fn, "输入 /help 查看命令。")
+
+
+def _run_with_status(
+    session: AgentSession,
+    task: str,
+    *,
+    output_fn: Callable[[str], Any],
+) -> AgentRunResult:
+    if not _interactive_output_enabled(output_fn):
+        return session.run(task)
+
+    # Rich is an optional presentation layer.  Console construction and status
+    # creation can fail in unusual terminals, so neither should prevent the
+    # actual task from running once in the plain execution path.
+    try:
+        from rich.console import Console
+
+        console = Console()
+        status = console.status("模型处理中…")
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        return session.run(task)
+
+    global _ACTIVE_STATUS_STOPPER
+    previous_stopper = _ACTIVE_STATUS_STOPPER
+    stopped = False
+
+    def stop_status() -> None:
+        nonlocal stopped
+        if stopped:
+            return
+        stopped = True
+        # Cleanup must never replace the task's result or interrupt signal.
+        with suppress(BaseException):
+            status.stop()
+
+    _ACTIVE_STATUS_STOPPER = stop_status
+    try:
+        status.start()
+    except KeyboardInterrupt:
+        stop_status()
+        if _ACTIVE_STATUS_STOPPER is stop_status:
+            _ACTIVE_STATUS_STOPPER = previous_stopper
+        raise
+    except Exception:
+        stop_status()
+        if _ACTIVE_STATUS_STOPPER is stop_status:
+            _ACTIVE_STATUS_STOPPER = previous_stopper
+        return session.run(task)
+
+    try:
+        return session.run(task)
+    finally:
+        stop_status()
+        if _ACTIVE_STATUS_STOPPER is stop_status:
+            _ACTIVE_STATUS_STOPPER = previous_stopper
+
+
+def _stop_active_status() -> None:
+    stopper = _ACTIVE_STATUS_STOPPER
+    if stopper is not None:
+        stopper()
+
+
 def _run_chat(
     session: AgentSession,
     input_fn: Callable[[str], str],
@@ -404,19 +556,26 @@ def _run_chat(
     *,
     new_session: Callable[[], AgentSession] | None = None,
     store: SessionStore | None = None,
+    show_plan: bool = True,
     show_stats: bool = False,
 ) -> int:
     """Read tasks until an explicit exit, EOF, interrupt, or abnormal result."""
     try:
         while True:
             try:
-                raw_task = input_fn("任务（/clear 清空历史，/exit 退出）: ")
+                raw_task = input_fn("输入指令：")
             except EOFError:
                 return 0
 
             task = raw_task.strip()
             if task == "/exit":
                 return 0
+            if task == "/help":
+                output_fn(
+                    "命令：/sessions 列出并恢复会话；/rename <标题> 修改标题；"
+                    "/clear 清空或切换会话；/exit 退出。"
+                )
+                continue
             if task == "/clear":
                 if new_session is None:
                     session.clear()
@@ -515,7 +674,15 @@ def _run_chat(
             if not task:
                 continue
 
-            result = session.run(task)
+            title_attempts_before = session.title_stats.provider_attempts
+            result = _run_with_status(session, task, output_fn=output_fn)
+            if (
+                show_plan
+                and title_attempts_before == 0
+                and session.title_stats.provider_attempts
+                and session.title_stats.fallback_used
+            ):
+                output_fn("会话标题请求未成功，已使用本地备用标题。")
             exit_code = _report_result(result, output_fn, error_fn, show_stats=show_stats)
             if exit_code != 0:
                 return exit_code
@@ -578,10 +745,11 @@ def main(
         effective_show_tool_events = (
             True if args.show_tool_events is None else args.show_tool_events
         )
+        effective_show_plan = True if args.show_plan is None else args.show_plan
 
         task = args.task
         if task is None and not effective_chat:
-            task = input_fn("任务: ").strip()
+            task = input_fn("输入指令：").strip()
         if not effective_chat and not task:
             report_error("错误: task 不能为空")
             return 2
@@ -646,6 +814,7 @@ def main(
                 event,
                 output_fn,
                 show_tool_events=effective_show_tool_events,
+                show_plan=effective_show_plan,
             ),
         )
         if effective_chat:
@@ -663,6 +832,16 @@ def main(
                 else:
                     session = AgentSession.create(loop, store, uuid.uuid4().hex)
                 try:
+                    _show_startup_header(
+                        output_fn,
+                        model=getattr(
+                            getattr(selected_provider, "config", None),
+                            "model",
+                            type(selected_provider).__name__,
+                        ),
+                        workspace=workspace,
+                        session=session,
+                    )
                     output_fn(
                         f"持久会话 ID: {session.session_id}\n存档路径: {session.archive_path}"
                     )
@@ -685,17 +864,41 @@ def main(
                     report_error,
                     new_session=create_session,
                     store=store,
+                    show_plan=effective_show_plan,
                     show_stats=args.show_stats,
                 )
+            _show_startup_header(
+                output_fn,
+                model=getattr(
+                    getattr(selected_provider, "config", None),
+                    "model",
+                    type(selected_provider).__name__,
+                ),
+                workspace=workspace,
+            )
             return _run_chat(
                 AgentSession(loop),
                 input_fn,
                 output_fn,
                 report_error,
+                show_plan=effective_show_plan,
                 show_stats=args.show_stats,
             )
 
-        result = loop.run(task)
+        _show_startup_header(
+            output_fn,
+            model=getattr(
+                getattr(selected_provider, "config", None),
+                "model",
+                type(selected_provider).__name__,
+            ),
+            workspace=workspace,
+        )
+        result = _run_with_status(
+            AgentSession(loop),
+            task,
+            output_fn=output_fn,
+        )
         return _report_result(result, output_fn, report_error, show_stats=args.show_stats)
     except KeyboardInterrupt:
         _report_interrupt(report_error)
