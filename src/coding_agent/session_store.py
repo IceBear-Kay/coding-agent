@@ -15,7 +15,7 @@ from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from coding_agent.context import ContextHistoryError, validate_completed_history
-from coding_agent.models import Message
+from coding_agent.models import CompactionRecord, Message
 
 SESSION_SCHEMA_VERSION = 1
 DEFAULT_MAX_SESSION_BYTES = 32 * 1024 * 1024
@@ -225,6 +225,7 @@ class SessionArchive(BaseModel):
     title: str | None = None
     title_generation_attempted: bool = False
     messages: list[Message] = Field(default_factory=list)
+    compaction: CompactionRecord | None = None
 
     @field_validator("session_id")
     @classmethod
@@ -264,6 +265,7 @@ class SessionArchive(BaseModel):
         now: datetime | None = None,
         title: str | None = None,
         title_generation_attempted: bool = False,
+        compaction: CompactionRecord | None = None,
     ) -> Self:
         timestamp = _normalize_timestamp(now or datetime.now(UTC))
         try:
@@ -275,6 +277,7 @@ class SessionArchive(BaseModel):
                 title=title,
                 title_generation_attempted=title_generation_attempted,
                 messages=[message.model_copy(deep=True) for message in messages],
+                compaction=compaction,
             )
         except (TypeError, ValueError, ValidationError) as exc:
             raise SessionValidationError("session archive is invalid") from exc
@@ -305,7 +308,21 @@ class SessionArchive(BaseModel):
             payload = json.loads(data.decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("archive root must be an object")
-            return cls.model_validate(payload)
+            try:
+                return cls.model_validate(payload)
+            except ValidationError as exc:
+                # A malformed derived summary must not make an otherwise valid
+                # complete history unusable. Drop only that optional field.
+                errors = exc.errors()
+                compaction_errors_only = bool(errors) and all(
+                    (location := error.get("loc", ())) and location[0] == "compaction"
+                    for error in errors
+                )
+                if "compaction" not in payload or not compaction_errors_only:
+                    raise
+                payload_without_compaction = dict(payload)
+                payload_without_compaction.pop("compaction", None)
+                return cls.model_validate(payload_without_compaction)
         except (
             UnicodeDecodeError,
             json.JSONDecodeError,

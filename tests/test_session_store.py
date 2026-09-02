@@ -380,3 +380,14 @@ def test_session_store_rejects_storage_root_symlink_when_supported(tmp_path: Pat
 
 def test_default_session_size_budget_is_32_mib() -> None:
     assert DEFAULT_MAX_SESSION_BYTES == 32 * 1024 * 1024
+
+
+def test_malformed_compaction_with_empty_error_location_is_safe(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path / "sessions")
+    archive = store.create("broken_compaction", tmp_path)
+    path = store.path_for(archive.session_id)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["compaction"] = {"covered_task_count": "bad"}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    restored = store.load(archive.session_id)
+    assert restored.compaction is None

@@ -63,6 +63,7 @@ class TaskStats(BaseModel):
     context_tokens: int | None = Field(default=None, ge=0)
     context_max_tokens: int | None = Field(default=None, ge=1)
     context_trimmed_tasks: int = Field(default=0, ge=0)
+    context_compacted_tasks: int = Field(default=0, ge=0)
     runtime_seconds: float = Field(default=0.0, ge=0.0)
     stop_reason: str | None = Field(default=None, min_length=1)
 
@@ -119,14 +120,26 @@ class AgentState(BaseModel):
     step_count: int = Field(default=0, ge=0)
     # Count historical task groups omitted from provider request contexts.
     context_trimmed_tasks: int = Field(default=0, ge=0)
+    context_compacted_tasks: int = Field(default=0, ge=0)
     stats: TaskStats = Field(default_factory=TaskStats)
     stop_reason: str | None = Field(default=None, min_length=1)
+
+
+class CompactionRecord(BaseModel):
+    """Validated, derived summary metadata for a persisted session."""
+
+    summary: str = Field(min_length=1, max_length=32_768)
+    covered_task_count: int = Field(ge=1)
+    covered_prefix_fingerprint: str = Field(min_length=16, max_length=128)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
 
 
 class SessionState(BaseModel):
     """In-memory history committed only after a task completes normally."""
 
     messages: list[Message] = Field(default_factory=list)
+    compaction: CompactionRecord | None = None
 
 
 class ToolResult(BaseModel):

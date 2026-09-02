@@ -6,6 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from coding_agent.agent import COMPLETED_STOP_REASON, AgentLoop, AgentRunResult
+from coding_agent.compaction import (
+    COMPACTION_AUTO_THRESHOLD,
+    CompactionResult,
+    apply_compaction_view,
+    compact_history,
+    compaction_message,
+    compaction_prefix_matches,
+)
 from coding_agent.models import AgentState, Message, SessionState, Usage
 from coding_agent.session_store import (
     MAX_SESSION_TITLE_LENGTH,
@@ -33,6 +41,18 @@ class SessionTitleStats:
     fallback_used: bool = False
 
 
+@dataclass
+class SessionCompactionStats:
+    """Usage isolated from the main task budget for summary requests."""
+
+    provider_attempts: int = 0
+    known_usage_requests: int = 0
+    unknown_usage_requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+
 class AgentSession:
     """Keep one authoritative history while each task gets a fresh AgentState."""
 
@@ -57,6 +77,8 @@ class AgentSession:
         self._lease = lease
         self._allow_auto_title = allow_auto_title
         self.title_stats = SessionTitleStats()
+        self.compaction_stats = SessionCompactionStats()
+        self.last_compaction_result: CompactionResult | None = None
         if archive is not None:
             if os.path.normcase(archive.workspace_root) != os.path.normcase(
                 str(loop.workspace.root)
@@ -71,7 +93,10 @@ class AgentSession:
                 for message in archive.messages
                 if self.loop.system_prompt is None or message.role != "system"
             ]
-        self.state = SessionState(messages=restored_messages)
+        self.state = SessionState(
+            messages=restored_messages,
+            compaction=archive.compaction if archive else None,
+        )
 
     @classmethod
     def create(cls, loop: AgentLoop, store: SessionStore, session_id: str) -> "AgentSession":
@@ -143,8 +168,23 @@ class AgentSession:
                 state=state,
                 error=SessionConflictError("session lease is no longer held"),
             )
+        self._maybe_auto_compact(task)
         self._prepare_title(task)
-        result = self.loop.run(task, history=self.state.messages)
+        context_prefix: list[Message] | None = None
+        compacted_task_count = 0
+        if (
+            self.state.compaction is not None
+            and self.loop.context_policy == "compact"
+            and compaction_prefix_matches(self.state.messages, self.state.compaction)
+        ):
+            context_prefix = [compaction_message(self.state.compaction)]
+            compacted_task_count = self.state.compaction.covered_task_count
+        result = self.loop.run(
+            task,
+            history=self.state.messages,
+            context_prefix=context_prefix,
+            compacted_task_count=compacted_task_count,
+        )
         if result.stop_reason == COMPLETED_STOP_REASON:
             committed_messages = [
                 message.model_copy(deep=True) for message in result.state.messages
@@ -152,7 +192,7 @@ class AgentSession:
             self.state.messages = committed_messages
             if self.store is not None and self._archive is not None:
                 candidate = self._archive.model_copy(
-                    update={"messages": committed_messages},
+                    update={"messages": committed_messages, "compaction": self.state.compaction},
                     deep=True,
                 )
                 try:
@@ -234,6 +274,91 @@ class AgentSession:
     def clear(self) -> None:
         """Discard committed messages while retaining the loop configuration."""
         self.state.messages.clear()
+        self.state.compaction = None
+
+    def compact(self) -> CompactionResult:
+        """Create one summary for eligible completed tasks without adding a task."""
+        if self.loop.context_policy != "compact":
+            result = CompactionResult(False, reason="compact_policy_required")
+            self.last_compaction_result = result
+            return result
+        if self._archive is not None and (self._lease is None or not self._lease.held):
+            result = CompactionResult(False, reason="session_lock_error")
+            self.last_compaction_result = result
+            return result
+        result = compact_history(
+            self.loop.provider,
+            self.state.messages,
+            previous=self.state.compaction,
+            max_context_bytes=self.loop.context_budget.max_bytes,
+            max_context_tokens=self.loop.effective_context_tokens,
+            tool_schemas=self.loop.registry.schemas(),
+        )
+        self._record_compaction_usage(result)
+        if not result.success or result.record is None:
+            self.last_compaction_result = result
+            return result
+        previous = self.state.compaction
+        if self._archive is not None and self.store is not None:
+            candidate = self._archive.model_copy(update={"compaction": result.record}, deep=True)
+            try:
+                self._archive = self.store.save(candidate, lease=self._lease)
+            except SessionStoreError:
+                result = CompactionResult(
+                    False,
+                    reason="summary_save_failed",
+                    covered_task_count=previous.covered_task_count if previous else 0,
+                    previous_task_count=previous.covered_task_count if previous else 0,
+                    before_bytes=result.before_bytes,
+                    after_bytes=result.after_bytes,
+                )
+                self.last_compaction_result = result
+                return result
+        self.state.compaction = result.record
+        self.last_compaction_result = result
+        return result
+
+    def _maybe_auto_compact(self, task: str) -> CompactionResult | None:
+        """Attempt at most one summary before the first main request of a task."""
+        if self.loop.context_policy != "compact" or not self.state.messages:
+            return None
+        system_messages = (
+            [Message(role="system", content=self.loop.system_prompt)]
+            if self.loop.system_prompt
+            and not any(message.role == "system" for message in self.state.messages)
+            else []
+        )
+        history_view = apply_compaction_view(self.state.messages, self.state.compaction)
+        candidate = [*system_messages, *history_view, Message(role="user", content=task)]
+        budget = self.loop.context_budget.check(candidate, self.loop.registry.schemas())
+        threshold_bytes = budget.used_bytes >= int(budget.max_bytes * COMPACTION_AUTO_THRESHOLD)
+        threshold_tokens = (
+            budget.used_tokens is not None
+            and budget.max_tokens is not None
+            and budget.used_tokens >= int(budget.max_tokens * COMPACTION_AUTO_THRESHOLD)
+        )
+        if not (threshold_bytes or threshold_tokens):
+            return None
+        return self.compact()
+
+    def _record_compaction_usage(self, result: CompactionResult) -> None:
+        if result.reason in {
+            "compact_policy_required",
+            "history_invalid",
+            "nothing_to_compact",
+            "session_lock_error",
+            "summary_input_limit",
+        }:
+            return
+        if result.input_tokens is None or result.output_tokens is None:
+            self.compaction_stats.unknown_usage_requests += 1
+            self.compaction_stats.provider_attempts += 1
+            return
+        self.compaction_stats.provider_attempts += 1
+        self.compaction_stats.known_usage_requests += 1
+        self.compaction_stats.input_tokens += result.input_tokens
+        self.compaction_stats.output_tokens += result.output_tokens
+        self.compaction_stats.total_tokens += result.input_tokens + result.output_tokens
 
     def close(self) -> None:
         """Release the persistent session lease, preserving the archive on disk."""
@@ -254,4 +379,5 @@ __all__ = [
     "SESSION_LOCK_ERROR_STOP_REASON",
     "SESSION_SAVE_ERROR_STOP_REASON",
     "SessionTitleStats",
+    "SessionCompactionStats",
 ]

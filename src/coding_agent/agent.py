@@ -99,7 +99,7 @@ class AgentLoop:
         max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
         max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
         model_window_tokens: int | None = None,
-        context_policy: ContextPolicy = "trim",
+        context_policy: ContextPolicy = "compact",
         retry_delay_seconds: float = 0.0,
         sleep: Callable[[float], None] = time.sleep,
         system_prompt: str | None = None,
@@ -133,8 +133,8 @@ class AgentLoop:
             raise ValueError("retry_delay_seconds must not be negative")
         if system_prompt is not None and not system_prompt.strip():
             raise ValueError("system_prompt must not be empty")
-        if context_policy not in {"stop", "trim"}:
-            raise ValueError("context policy must be 'stop' or 'trim'")
+        if context_policy not in {"stop", "trim", "compact"}:
+            raise ValueError("context policy must be 'stop', 'trim', or 'compact'")
 
         self.provider = provider
         self.workspace = workspace
@@ -162,6 +162,8 @@ class AgentLoop:
         task: str,
         *,
         history: Sequence[Message] | None = None,
+        context_prefix: Sequence[Message] | None = None,
+        compacted_task_count: int = 0,
     ) -> AgentRunResult:
         """Execute one task, optionally continuing from completed conversation history."""
         if not isinstance(task, str) or not task.strip():
@@ -202,12 +204,16 @@ class AgentLoop:
                         max_context_bytes=self.context_budget.max_bytes,
                         max_context_tokens=self.effective_context_tokens,
                         policy=self.context_policy,
+                        background_messages=context_prefix or (),
+                        compacted_task_count=compacted_task_count,
                     )
                     state.context_trimmed_tasks = max(
                         state.context_trimmed_tasks,
                         selection.removed_task_count,
                     )
                     state.stats.context_trimmed_tasks = state.context_trimmed_tasks
+                    state.context_compacted_tasks = selection.compacted_task_count
+                    state.stats.context_compacted_tasks = selection.compacted_task_count
                     context_result = self.context_budget.check(selection.messages, tool_schemas)
                     state.stats.context_bytes = context_result.used_bytes
                     state.stats.context_max_bytes = context_result.max_bytes

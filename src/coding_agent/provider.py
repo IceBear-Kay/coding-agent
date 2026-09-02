@@ -38,6 +38,7 @@ class ModelProvider(Protocol):
         tool_schemas: Sequence[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ModelResponse:
         """Generate the next model response for the current conversation."""
         ...
@@ -272,6 +273,7 @@ class OpenAICompatibleProvider:
         tool_schemas: Sequence[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ModelResponse:
         """Build, send, and parse one chat completion request."""
         payload = build_chat_completion_payload(
@@ -280,7 +282,12 @@ class OpenAICompatibleProvider:
             tool_schemas,
             max_tokens=max_tokens,
         )
-        raw_response = send_chat_completion_request(self.config, payload, self.client)
+        raw_response = send_chat_completion_request(
+            self.config,
+            payload,
+            self.client,
+            timeout_seconds=timeout_seconds,
+        )
         return parse_chat_completion_response(raw_response)
 
     def generate_title(self, task: str) -> ModelResponse:
@@ -323,6 +330,7 @@ class FakeProvider:
         self._responses = [response.model_copy(deep=True) for response in responses]
         self.requests: list[tuple[list[Message], list[dict[str, Any]]]] = []
         self.max_tokens: list[int | None] = []
+        self.timeout_seconds: list[float | None] = []
 
     def complete(
         self,
@@ -330,6 +338,7 @@ class FakeProvider:
         tool_schemas: Sequence[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        timeout_seconds: float | None = None,
     ) -> ModelResponse:
         """Record one request and return the next configured response."""
         if not self._responses:
@@ -342,4 +351,5 @@ class FakeProvider:
             )
         )
         self.max_tokens.append(max_tokens)
+        self.timeout_seconds.append(timeout_seconds)
         return self._responses.pop(0).model_copy(deep=True)
