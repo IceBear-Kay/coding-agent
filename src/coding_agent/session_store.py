@@ -409,7 +409,7 @@ class SessionStore:
             try:
                 _validate_session_id(session_id)
                 archive = self.load(session_id, workspace_root=expected)
-            except SessionStoreError:
+            except (SessionStoreError, ValueError):
                 skipped.append(f"{path.name}: skipped")
                 continue
             archives.append(archive)
