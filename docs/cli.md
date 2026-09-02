@@ -60,10 +60,12 @@ uv run --env-file .env coding-agent --chat --resume demo-chat --session-dir .loc
 - `--read-only`：同时关闭写入和执行工具；不能与显式 `--allow-write` 或 `--allow-exec` 同时使用。
 - `--show-tool-events` / `--hide-tool-events`：默认显示或隐藏正常工具调用和结果提示；隐藏时审批、错误、重要警告、最终回答和停止原因仍显示。
 - `--show-stats`：默认关闭；任务结束时显示本次运行的耗时、Provider 请求、工具调度、上下文和服务端 Token 摘要，不改变模型行为。
-- `--max-steps`：每个任务允许的 Provider 调用次数，默认 8；临时错误重试也计入预算。
+- `--max-steps`：每个任务允许的 Provider 调用次数，默认 64；临时错误重试也计入预算。
 - `--max-retries`：每个任务中单次临时 Provider 错误最多重试次数，默认 2；设为 0 可关闭自动重试。
-- `--max-context-bytes`：每次 Provider 请求前的上下文 UTF-8 字节预算，默认 262144；必须为正整数，超限时按 `--context-policy` 处理。
-- `--context-policy`：上下文超预算时的策略，默认 `stop`；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。
+- `--max-context-bytes`：每次 Provider 请求前的上下文 UTF-8 字节预算，默认 8388608；必须为正整数，超限时按 `--context-policy` 处理。
+- `--max-context-tokens`：每次请求输入 token 的本地粗估预算，默认 524288；不等同于精确 tokenizer 计数。
+- `--max-output-tokens`：每次模型请求的 `max_tokens` 上限，默认 32768；V4 Flash/Pro 的模型能力上限为 384000。
+- `--context-policy`：上下文超预算时的策略，默认 `trim`；`stop` 立即停止，`trim` 按完整旧任务从最早开始裁剪。
 - `--command-timeout`：命令超时上限，默认 20 秒，最大 60 秒。
 - `--command-output-limit`：stdout 和 stderr 共享的输出字节上限，默认 65536。
 
@@ -92,7 +94,7 @@ PDF 的 `start_page` 和 `end_page` 从 1 开始且包含结束页，拒绝布�
 
 工具调用和结果的正常过程提示默认显示。使用 `--hide-tool-events` 可隐藏这些提示，但不会影响 Provider 消息、工具执行或历史；审批预览、审批结果、工具错误、重要警告、最终回答和停止原因始终保留。`--show-tool-events` 可显式恢复显示，两者互斥。
 
-`--max-context-bytes` 使用内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数作为统一口径。它是软件级输入预算，不是模型 Token 数、API 请求精确字节数或模型上下文窗口保证。每次实际 Provider 请求前都会检查预算；默认 `--context-policy stop` 超限时返回 `context_limit`，不发送请求；显式使用 `--context-policy trim` 时，按完整旧任务从最早开始裁剪，仍无法满足预算则返回 `context_limit`。裁剪不会摘要或重试请求。该预算独立于 `--max-steps` 的模型调用次数、`--max-retries` 的临时错误重试次数以及本地命令的 `--command-output-limit`。
+`--max-context-bytes` 使用内部消息、工具参数、工具结果、`reasoning_content` 和工具 Schema 的紧凑 JSON UTF-8 字节数作为统一口径。`--max-context-tokens` 对同一序列化请求按 UTF-8 字节做粗估，不是模型 tokenizer 的精确计数。模型窗口、输出额度和安全余量会进一步限制有效输入预算。每次实际 Provider 请求前都会检查字节和 token 预算；默认 `trim` 按完整旧任务从最早开始裁剪，`stop` 则立即返回 `context_limit`，仍无法满足约束时不发送请求。裁剪不会摘要或重试请求。上述预算独立于 `--max-steps` 的模型调用次数、`--max-retries` 的临时错误重试次数以及本地命令的 `--command-output-limit`。
 
 ## 运行统计
 
@@ -152,7 +154,7 @@ uv run --env-file .env coding-agent "请创建 solution.py，读取两个整数�
 
 ## Provider 配置
 
-未通过测试注入 Provider 时，CLI 从环境变量创建 DeepSeek Provider。仓库提供不含凭据的 `.env.example`，程序不会自动搜索或读取 `.env`；需要使用配置文件时，必须由 `uv` 显式加载：
+未通过测试注入 Provider 时，CLI 从启动目录的 `.env` 与进程环境创建 DeepSeek Provider，进程环境变量优先。仓库提供不含凭据的 `.env.example`；也可以由 `uv` 显式加载：
 
 ```powershell
 if (Test-Path -LiteralPath .env) {

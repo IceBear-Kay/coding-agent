@@ -1,13 +1,16 @@
 """Deterministic software-level context byte budget calculations."""
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from coding_agent.models import Message
 
-DEFAULT_MAX_CONTEXT_BYTES = 262_144
+DEFAULT_MAX_CONTEXT_BYTES = 8_388_608
+DEFAULT_MAX_CONTEXT_TOKENS = 524_288
+DEFAULT_TOKEN_BYTES = 4
 ContextPolicy = Literal["stop", "trim"]
 
 
@@ -29,6 +32,17 @@ class ContextLimitError(ValueError):
         self.used_bytes = used_bytes
         self.max_bytes = max_bytes
         super().__init__(f"context input exceeds byte budget: {used_bytes} > {max_bytes}")
+
+
+class ContextTokenLimitError(ValueError):
+    """Describe an estimated input-token budget violation."""
+
+    def __init__(self, used_tokens: int, max_tokens: int) -> None:
+        self.used_tokens = used_tokens
+        self.max_tokens = max_tokens
+        super().__init__(
+            f"estimated context input exceeds token budget: {used_tokens} > {max_tokens}"
+        )
 
 
 def serialize_context(
@@ -62,17 +76,40 @@ def measure_context_bytes(
     return len(serialize_context(messages, tools))
 
 
+def estimate_context_tokens(
+    messages: Sequence[Message],
+    tools: Sequence[Mapping[str, Any]],
+) -> int:
+    """Estimate input tokens from the serialized request representation.
+
+    This provider-independent heuristic is not an exact model tokenizer. It is
+    kept next to serialization so reasoning fields, tool arguments and schemas
+    are included in the same stable input view.
+    """
+    serialized = serialize_context(messages, tools)
+    return max(1, math.ceil(len(serialized) / DEFAULT_TOKEN_BYTES))
+
+
+estimate_input_tokens = estimate_context_tokens
+
+
 @dataclass(frozen=True, slots=True)
 class ContextBudgetResult:
     """Immutable result of comparing measured context bytes with a budget."""
 
     used_bytes: int
     max_bytes: int
+    used_tokens: int | None = None
+    max_tokens: int | None = None
 
     @property
     def within_budget(self) -> bool:
         """Whether the measured bytes are allowed, including an exact-boundary match."""
-        return self.used_bytes <= self.max_bytes
+        if self.used_bytes > self.max_bytes:
+            return False
+        return self.max_tokens is None or (
+            self.used_tokens is not None and self.used_tokens <= self.max_tokens
+        )
 
     @property
     def exceeded(self) -> bool:
@@ -85,12 +122,18 @@ class ContextBudget:
     """Configuration and pure operations for the software context byte budget."""
 
     max_bytes: int = DEFAULT_MAX_CONTEXT_BYTES
+    max_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int):
             raise TypeError("max_bytes must be an integer")
         if self.max_bytes <= 0:
             raise ValueError("max_bytes must be greater than zero")
+        if self.max_tokens is not None:
+            if isinstance(self.max_tokens, bool) or not isinstance(self.max_tokens, int):
+                raise TypeError("max_tokens must be an integer")
+            if self.max_tokens <= 0:
+                raise ValueError("max_tokens must be greater than zero")
 
     def measure(
         self,
@@ -109,6 +152,8 @@ class ContextBudget:
         return ContextBudgetResult(
             used_bytes=self.measure(messages, tools),
             max_bytes=self.max_bytes,
+            used_tokens=(estimate_context_tokens(messages, tools) if self.max_tokens else None),
+            max_tokens=self.max_tokens,
         )
 
 
@@ -120,11 +165,15 @@ class ContextSelectionResult:
     used_bytes: int
     max_bytes: int
     removed_task_count: int = 0
+    used_tokens: int = 0
+    max_tokens: int | None = None
 
     @property
     def within_budget(self) -> bool:
         """Whether the selected request context fits the configured byte budget."""
-        return self.used_bytes <= self.max_bytes
+        return self.used_bytes <= self.max_bytes and (
+            self.max_tokens is None or self.used_tokens <= self.max_tokens
+        )
 
     @property
     def trimmed(self) -> bool:
@@ -138,6 +187,7 @@ def select_context(
     *,
     current_task_start: int,
     max_context_bytes: int = DEFAULT_MAX_CONTEXT_BYTES,
+    max_context_tokens: int | None = DEFAULT_MAX_CONTEXT_TOKENS,
     policy: ContextPolicy = "stop",
 ) -> ContextSelectionResult:
     """Select a request context while preserving complete task boundaries.
@@ -150,6 +200,11 @@ def select_context(
     if policy not in {"stop", "trim"}:
         raise ValueError("context policy must be 'stop' or 'trim'")
     budget = ContextBudget(max_bytes=max_context_bytes)
+    if max_context_tokens is not None:
+        if isinstance(max_context_tokens, bool) or not isinstance(max_context_tokens, int):
+            raise TypeError("max_context_tokens must be an integer")
+        if max_context_tokens <= 0:
+            raise ValueError("max_context_tokens must be greater than zero")
     if isinstance(current_task_start, bool) or not isinstance(current_task_start, int):
         raise TypeError("current_task_start must be an integer")
     if current_task_start < 0 or current_task_start >= len(messages):
@@ -161,8 +216,15 @@ def select_context(
     removed_indices: set[int] = set()
     selected = list(messages)
     used_bytes = budget.measure(selected, tools)
+    used_tokens = estimate_context_tokens(selected, tools)
     removed_task_count = 0
-    if policy == "trim" and used_bytes > budget.max_bytes:
+
+    def exceeds() -> bool:
+        return used_bytes > budget.max_bytes or (
+            max_context_tokens is not None and used_tokens > max_context_tokens
+        )
+
+    if policy == "trim" and exceeds():
         for start, end in groups:
             removed_indices.update(
                 index for index in range(start, end) if messages[index].role != "system"
@@ -172,7 +234,8 @@ def select_context(
                 message for index, message in enumerate(messages) if index not in removed_indices
             ]
             used_bytes = budget.measure(selected, tools)
-            if used_bytes <= budget.max_bytes:
+            used_tokens = estimate_context_tokens(selected, tools)
+            if not exceeds():
                 break
 
     return ContextSelectionResult(
@@ -180,6 +243,8 @@ def select_context(
         used_bytes=used_bytes,
         max_bytes=budget.max_bytes,
         removed_task_count=removed_task_count,
+        used_tokens=used_tokens,
+        max_tokens=max_context_tokens,
     )
 
 
@@ -253,9 +318,12 @@ def check_context_budget(
     messages: Sequence[Message],
     tools: Sequence[Mapping[str, Any]],
     max_context_bytes: int = DEFAULT_MAX_CONTEXT_BYTES,
+    max_context_tokens: int | None = None,
 ) -> ContextBudgetResult:
     """Measure a context and return a safe, non-mutating budget result."""
-    return ContextBudget(max_bytes=max_context_bytes).check(messages, tools)
+    return ContextBudget(max_bytes=max_context_bytes, max_tokens=max_context_tokens).check(
+        messages, tools
+    )
 
 
 def validate_completed_history(messages: Sequence[Message]) -> None:
@@ -286,15 +354,19 @@ def validate_completed_history(messages: Sequence[Message]) -> None:
 
 __all__ = [
     "DEFAULT_MAX_CONTEXT_BYTES",
+    "DEFAULT_MAX_CONTEXT_TOKENS",
     "ContextBudget",
     "ContextBudgetResult",
     "ContextHistoryError",
     "ContextPolicy",
     "ContextSelectionResult",
     "ContextLimitError",
+    "ContextTokenLimitError",
     "ContextSerializationError",
     "check_context_budget",
     "measure_context_bytes",
+    "estimate_context_tokens",
+    "estimate_input_tokens",
     "select_context",
     "serialize_context",
     "validate_completed_history",

@@ -216,11 +216,12 @@ def test_session_context_budget_applies_to_accumulated_history(tmp_path: Path) -
 
     assert first.stop_reason == second.stop_reason == "completed"
     assert second.state.step_count == 1
-    assert third.stop_reason == "context_limit"
-    assert third.state.step_count == 0
-    assert len(provider.requests) == 2
-    assert session.messages == second.state.messages
-    assert third_task not in [message.content for message in session.messages]
+    assert third.stop_reason == "completed"
+    assert third.state.step_count == 1
+    assert len(provider.requests) == 3
+    assert session.messages == third.state.messages
+    assert third_task in [message.content for message in session.messages]
+    assert third.state.context_trimmed_tasks == 1
 
 
 def test_session_retry_budget_resets_for_next_task(tmp_path: Path) -> None:

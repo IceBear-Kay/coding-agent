@@ -12,6 +12,8 @@ from typing import Any
 from coding_agent.agent import (
     COMPLETED_STOP_REASON,
     DEFAULT_MAX_CONTEXT_BYTES,
+    DEFAULT_MAX_CONTEXT_TOKENS,
+    DEFAULT_MAX_OUTPUT_TOKENS,
     DEFAULT_MAX_STEPS,
     DEFAULT_SYSTEM_PROMPT,
     AgentEvent,
@@ -24,8 +26,12 @@ from coding_agent.command_tools import (
     DEFAULT_COMMAND_TIMEOUT_SECONDS,
     CommandLimits,
 )
-from coding_agent.config import ProviderConfig
-from coding_agent.errors import ProviderError
+from coding_agent.config import (
+    ProviderConfig,
+    load_startup_environment,
+    model_capability,
+)
+from coding_agent.errors import ProviderConfigurationError, ProviderError
 from coding_agent.file_tools import create_workspace_registry
 from coding_agent.models import ToolResult
 from coding_agent.provider import ModelProvider, OpenAICompatibleProvider
@@ -179,10 +185,22 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"请求前上下文 UTF-8 字节预算（默认：{DEFAULT_MAX_CONTEXT_BYTES}）。",
     )
     parser.add_argument(
+        "--max-context-tokens",
+        type=_positive_int,
+        default=DEFAULT_MAX_CONTEXT_TOKENS,
+        help=f"请求前输入 token 估算预算（默认：{DEFAULT_MAX_CONTEXT_TOKENS}，仅为粗估）。",
+    )
+    parser.add_argument(
+        "--max-output-tokens",
+        type=_positive_int,
+        default=DEFAULT_MAX_OUTPUT_TOKENS,
+        help=f"每次模型请求的 max_tokens 上限（默认：{DEFAULT_MAX_OUTPUT_TOKENS}）。",
+    )
+    parser.add_argument(
         "--context-policy",
         choices=("stop", "trim"),
-        default="stop",
-        help="上下文超预算时的处理策略（默认：stop）。",
+        default="trim",
+        help="上下文超预算时的处理策略（默认：trim）。",
     )
     return parser
 
@@ -198,7 +216,13 @@ def _non_negative_int(value: str) -> int:
 
 
 def _default_provider() -> ModelProvider:
-    return OpenAICompatibleProvider(ProviderConfig.from_env())
+    config = ProviderConfig.from_env(load_startup_environment(Path.cwd()))
+    capability = model_capability(config.model)
+    if capability is None:
+        raise ProviderConfigurationError(
+            f"Unsupported model capability: {config.model}; use a supported DeepSeek model"
+        )
+    return OpenAICompatibleProvider(config)
 
 
 def _report_result(
@@ -259,6 +283,8 @@ def _format_stats(result: AgentRunResult) -> str:
         fields.append("上下文: 未知")
     else:
         fields.append(f"上下文: {stats.context_bytes}/{stats.context_max_bytes} 字节")
+    if stats.context_tokens is not None and stats.context_max_tokens is not None:
+        fields.append(f"估算输入 Token: {stats.context_tokens}/{stats.context_max_tokens}（粗估）")
     if stats.context_trimmed_tasks:
         fields.append(f"省略历史任务: {stats.context_trimmed_tasks} 个")
     fields.append(f"停止原因: {result.stop_reason or '未知'}")
@@ -504,7 +530,22 @@ def main(
             else None,
             command_limits=command_limits,
         )
-        selected_provider = provider if provider is not None else _default_provider()
+        model_window_tokens: int | None = None
+        if provider is None:
+            config = ProviderConfig.from_env(load_startup_environment(Path.cwd()))
+            capability = model_capability(config.model)
+            if capability is None:
+                raise ProviderConfigurationError(
+                    f"Unsupported model capability: {config.model}; use a supported DeepSeek model"
+                )
+            if args.max_output_tokens > capability.max_output_tokens:
+                raise ProviderConfigurationError(
+                    "max-output-tokens exceeds the selected model capability"
+                )
+            selected_provider = OpenAICompatibleProvider(config)
+            model_window_tokens = capability.context_window_tokens
+        else:
+            selected_provider = provider
         system_prompt = DEFAULT_SYSTEM_PROMPT
         if args.resume is not None:
             system_prompt += (
@@ -518,6 +559,9 @@ def main(
             max_steps=args.max_steps,
             max_retries=args.max_retries,
             max_context_bytes=args.max_context_bytes,
+            max_context_tokens=args.max_context_tokens,
+            max_output_tokens=args.max_output_tokens,
+            model_window_tokens=model_window_tokens,
             context_policy=args.context_policy,
             system_prompt=system_prompt,
             event_callback=lambda event: _report_event(

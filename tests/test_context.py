@@ -5,10 +5,12 @@ import pytest
 
 from coding_agent.context import (
     DEFAULT_MAX_CONTEXT_BYTES,
+    DEFAULT_MAX_CONTEXT_TOKENS,
     ContextBudget,
     ContextHistoryError,
     ContextSerializationError,
     check_context_budget,
+    estimate_context_tokens,
     measure_context_bytes,
     select_context,
     serialize_context,
@@ -22,7 +24,28 @@ def test_empty_context_uses_compact_utf8_json() -> None:
     assert serialized == b'{"messages":[],"tools":[]}'
     assert measure_context_bytes([], []) == len(serialized)
     assert check_context_budget([], []).within_budget
-    assert DEFAULT_MAX_CONTEXT_BYTES == 262144
+    assert DEFAULT_MAX_CONTEXT_BYTES == 8_388_608
+    assert DEFAULT_MAX_CONTEXT_TOKENS == 524_288
+
+
+def test_estimated_tokens_include_unicode_reasoning_tools_and_are_monotonic() -> None:
+    base = [Message(role="user", content="读取文件")]
+    with_reasoning = [
+        Message(role="user", content="读取文件"),
+        Message(role="assistant", content="答案", reasoning_content="检查路径"),
+    ]
+    tools = [{"type": "function", "function": {"name": "read_file"}}]
+
+    assert estimate_context_tokens(base, []) >= 1
+    assert estimate_context_tokens(with_reasoning, tools) > estimate_context_tokens(base, [])
+
+
+def test_context_budget_can_check_estimated_token_limit() -> None:
+    messages = [Message(role="user", content="a longer request")]
+    used = estimate_context_tokens(messages, [])
+
+    assert check_context_budget(messages, [], max_context_tokens=used).within_budget
+    assert check_context_budget(messages, [], max_context_tokens=used - 1).exceeded
 
 
 def test_context_serialization_is_deterministic_and_does_not_mutate_inputs() -> None:
@@ -341,3 +364,25 @@ def test_select_context_allows_tool_call_id_reuse_across_tasks() -> None:
 
     assert result.messages == tuple(current_only)
     assert result.removed_task_count == 2
+
+
+def test_select_context_trim_applies_token_budget_independently_of_bytes() -> None:
+    messages = [
+        Message(role="user", content="old task"),
+        Message(role="assistant", content="old answer"),
+        Message(role="user", content="current task"),
+    ]
+    current_tokens = estimate_context_tokens([messages[-1]], [])
+
+    result = select_context(
+        messages,
+        [],
+        current_task_start=2,
+        max_context_bytes=8_388_608,
+        max_context_tokens=current_tokens,
+        policy="trim",
+    )
+
+    assert result.messages == (messages[-1],)
+    assert result.used_tokens <= current_tokens
+    assert result.removed_task_count == 1

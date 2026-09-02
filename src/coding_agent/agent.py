@@ -1,5 +1,6 @@
 """The minimal provider-tool agent loop."""
 
+import inspect
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -8,11 +9,13 @@ from typing import Literal
 
 from coding_agent.context import (
     DEFAULT_MAX_CONTEXT_BYTES,
+    DEFAULT_MAX_CONTEXT_TOKENS,
     ContextBudget,
     ContextHistoryError,
     ContextLimitError,
     ContextPolicy,
     ContextSerializationError,
+    ContextTokenLimitError,
     select_context,
 )
 from coding_agent.errors import FatalProviderError, ProviderError, TransientProviderError
@@ -33,7 +36,9 @@ PROVIDER_ERROR_STOP_REASON = "provider_error"
 TRANSIENT_PROVIDER_ERROR_STOP_REASON = "transient_provider_error"
 CONTEXT_LIMIT_STOP_REASON = "context_limit"
 CONTEXT_ERROR_STOP_REASON = "context_error"
-DEFAULT_MAX_STEPS = 8
+DEFAULT_MAX_STEPS = 64
+DEFAULT_MAX_OUTPUT_TOKENS = 32_768
+DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS = 16_384
 NORMAL_FINISH_REASONS = frozenset({None, "stop", "completed"})
 NON_NORMAL_FINISH_REASONS = frozenset({"length", "content_filter", "insufficient_system_resource"})
 DEFAULT_SYSTEM_PROMPT = (
@@ -96,7 +101,10 @@ class AgentLoop:
         max_steps: int = DEFAULT_MAX_STEPS,
         max_retries: int = 2,
         max_context_bytes: int = DEFAULT_MAX_CONTEXT_BYTES,
-        context_policy: ContextPolicy = "stop",
+        max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+        model_window_tokens: int | None = None,
+        context_policy: ContextPolicy = "trim",
         retry_delay_seconds: float = 0.0,
         sleep: Callable[[float], None] = time.sleep,
         system_prompt: str | None = None,
@@ -106,6 +114,26 @@ class AgentLoop:
             raise ValueError("max_steps must be greater than zero")
         if max_retries < 0:
             raise ValueError("max_retries must not be negative")
+        if isinstance(max_context_tokens, bool) or not isinstance(max_context_tokens, int):
+            raise TypeError("max_context_tokens must be an integer")
+        if max_context_tokens <= 0:
+            raise ValueError("max_context_tokens must be greater than zero")
+        if isinstance(max_output_tokens, bool) or not isinstance(max_output_tokens, int):
+            raise TypeError("max_output_tokens must be an integer")
+        if max_output_tokens <= 0:
+            raise ValueError("max_output_tokens must be greater than zero")
+        if model_window_tokens is not None:
+            if isinstance(model_window_tokens, bool) or not isinstance(model_window_tokens, int):
+                raise TypeError("model_window_tokens must be an integer")
+            if model_window_tokens <= 0:
+                raise ValueError("model_window_tokens must be greater than zero")
+            if max_output_tokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS >= model_window_tokens:
+                raise ValueError("max_output_tokens leaves no model context budget")
+            if (
+                max_context_tokens + max_output_tokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS
+                > model_window_tokens
+            ):
+                raise ValueError("configured context and output budgets exceed model window")
         if retry_delay_seconds < 0:
             raise ValueError("retry_delay_seconds must not be negative")
         if system_prompt is not None and not system_prompt.strip():
@@ -119,7 +147,14 @@ class AgentLoop:
         self.dispatcher = dispatcher if dispatcher is not None else ToolDispatcher(self.registry)
         self.max_steps = max_steps
         self.max_retries = max_retries
-        self.context_budget = ContextBudget(max_bytes=max_context_bytes)
+        self.max_context_tokens = max_context_tokens
+        self.max_output_tokens = max_output_tokens
+        self.model_window_tokens = model_window_tokens
+        self.effective_context_tokens = max_context_tokens
+        self.context_budget = ContextBudget(
+            max_bytes=max_context_bytes,
+            max_tokens=self.effective_context_tokens,
+        )
         self.context_policy = context_policy
         self.retry_delay_seconds = retry_delay_seconds
         self.sleep = sleep
@@ -170,6 +205,7 @@ class AgentLoop:
                         tool_schemas,
                         current_task_start=current_task_start,
                         max_context_bytes=self.context_budget.max_bytes,
+                        max_context_tokens=self.effective_context_tokens,
                         policy=self.context_policy,
                     )
                     state.context_trimmed_tasks = max(
@@ -180,14 +216,23 @@ class AgentLoop:
                     context_result = self.context_budget.check(selection.messages, tool_schemas)
                     state.stats.context_bytes = context_result.used_bytes
                     state.stats.context_max_bytes = context_result.max_bytes
+                    state.stats.context_tokens = selection.used_tokens
+                    state.stats.context_max_tokens = selection.max_tokens
                 except (ContextHistoryError, ContextSerializationError) as exc:
                     state.stop_reason = CONTEXT_ERROR_STOP_REASON
                     return result(error=exc)
-                if context_result.exceeded:
+                if context_result.used_bytes > context_result.max_bytes:
                     state.stop_reason = CONTEXT_LIMIT_STOP_REASON
                     error = ContextLimitError(
                         used_bytes=context_result.used_bytes,
                         max_bytes=context_result.max_bytes,
+                    )
+                    return result(error=error)
+                if selection.used_tokens > self.effective_context_tokens:
+                    state.stop_reason = CONTEXT_LIMIT_STOP_REASON
+                    error = ContextTokenLimitError(
+                        used_tokens=selection.used_tokens,
+                        max_tokens=self.effective_context_tokens,
                     )
                     return result(error=error)
 
@@ -196,7 +241,7 @@ class AgentLoop:
                 state.step_count += 1
                 state.stats.provider_attempts += 1
                 try:
-                    response = self.provider.complete(list(selection.messages), tool_schemas)
+                    response = self._complete_provider(selection.messages, tool_schemas)
                 except KeyboardInterrupt:
                     # A started request with no usable response has unknown usage.
                     state.stats.unknown_usage_requests += 1
@@ -272,6 +317,25 @@ class AgentLoop:
 
         # The loop always returns from the body because max_steps is positive.
         raise RuntimeError("Agent loop exited without a terminal result")
+
+    def _complete_provider(
+        self,
+        messages: Sequence[Message],
+        tool_schemas: Sequence[dict[str, object]],
+    ) -> ModelResponse:
+        """Pass the output budget while retaining compatibility with old doubles."""
+        complete = self.provider.complete
+        try:
+            parameters = inspect.signature(complete).parameters.values()
+            supports_budget = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == "max_tokens"
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            supports_budget = True
+        if supports_budget:
+            return complete(list(messages), tool_schemas, max_tokens=self.max_output_tokens)
+        return complete(list(messages), tool_schemas)
 
     @staticmethod
     def _finish_stop_reason(response: ModelResponse) -> str:

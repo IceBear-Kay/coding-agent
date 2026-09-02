@@ -115,6 +115,60 @@ def test_agent_loop_runs_tool_then_returns_final_answer(tmp_path: Path) -> None:
     ]
     assert provider.requests[1][0] == result.state.messages[:3]
     assert provider.requests[0][0] == result.state.messages[:1]
+    assert provider.max_tokens == [32_768, 32_768]
+
+
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
+def test_agent_loop_accepts_65536_output_budget_with_v4_window(tmp_path: Path, model: str) -> None:
+    provider = FakeProvider([ModelResponse(text="Done", finish_reason="stop")])
+    loop = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        max_context_tokens=524_288,
+        max_output_tokens=65_536,
+        model_window_tokens=1_000_000,
+    )
+
+    assert loop.effective_context_tokens == 524_288
+    result = loop.run(f"Use {model}")
+    assert result.stop_reason == "completed"
+    assert provider.max_tokens == [65_536]
+
+
+def test_agent_loop_rejects_output_budget_that_exhausts_model_window(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="leaves no model context budget"):
+        AgentLoop(
+            FakeProvider([]),
+            Workspace(tmp_path),
+            max_output_tokens=90_000,
+            model_window_tokens=100_000,
+        )
+
+
+def test_agent_loop_rejects_context_and_output_budget_over_total_window(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="exceed model window"):
+        AgentLoop(
+            FakeProvider([]),
+            Workspace(tmp_path),
+            max_context_tokens=930_000,
+            max_output_tokens=65_536,
+            model_window_tokens=1_000_000,
+        )
+
+
+def test_agent_loop_reports_token_limit_independently_of_byte_limit(tmp_path: Path) -> None:
+    provider = FakeProvider([])
+    result = AgentLoop(
+        provider,
+        Workspace(tmp_path),
+        max_context_bytes=8_388_608,
+        max_context_tokens=1,
+        context_policy="stop",
+    ).run("This request exceeds one estimated token")
+
+    assert result.stop_reason == "context_limit"
+    assert "token budget" in str(result.error)
+    assert provider.requests == []
 
 
 def test_agent_loop_reads_document_into_tool_history(tmp_path: Path) -> None:
@@ -963,7 +1017,7 @@ def test_agent_loop_collects_task_runtime_usage_and_tool_counts(tmp_path: Path) 
     assert result.stats.output_tokens == 6
     assert result.stats.total_tokens == 36
     assert result.stats.context_bytes is not None
-    assert result.stats.context_max_bytes == 262144
+    assert result.stats.context_max_bytes == 8_388_608
     assert result.stats.runtime_seconds >= 0
 
 

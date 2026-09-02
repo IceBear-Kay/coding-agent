@@ -1,6 +1,6 @@
 import pytest
 
-from coding_agent.config import ProviderConfig
+from coding_agent.config import ProviderConfig, load_startup_environment, model_capability
 from coding_agent.errors import ProviderConfigurationError
 
 
@@ -59,3 +59,41 @@ def test_provider_config_selects_model_from_environment(model: str) -> None:
     config = ProviderConfig.from_env(environment)
 
     assert config.model == model
+
+
+def test_startup_dotenv_is_loaded_with_process_environment_precedence(
+    tmp_path, monkeypatch
+) -> None:
+    (tmp_path / ".env").write_text(
+        "DEEPSEEK_API_KEY=file-key\nDEEPSEEK_BASE_URL=https://file.example\n"
+        "DEEPSEEK_MODEL=deepseek-v4-flash\nDEEPSEEK_TIMEOUT_SECONDS=10\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "process-key")
+
+    values = load_startup_environment(tmp_path)
+
+    assert values["DEEPSEEK_API_KEY"] == "process-key"
+    assert values["DEEPSEEK_BASE_URL"] == "https://file.example"
+    capability = model_capability("deepseek-v4-pro")
+    assert capability is not None
+    assert capability.context_window_tokens == 1_000_000
+    assert capability.max_output_tokens == 384_000
+    assert model_capability("unknown-model") is None
+
+
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
+def test_v4_model_capabilities_match_documented_limits(model: str) -> None:
+    capability = model_capability(model)
+
+    assert capability is not None
+    assert capability.context_window_tokens == 1_000_000
+    assert capability.max_output_tokens == 384_000
+
+
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro"])
+def test_v4_models_allow_65536_output_override(model: str) -> None:
+    capability = model_capability(model)
+
+    assert capability is not None
+    assert capability.max_output_tokens >= 65_536
