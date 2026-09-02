@@ -736,6 +736,22 @@ def test_cli_status_stops_before_user_input_and_runs_task_once(
     assert events.index("stop") < events.index("output") < events.index("input")
 
 
+def test_cli_status_noninteractive_branch_runs_task_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeSession:
+        def run(self, _: str) -> str:
+            calls.append("run")
+            return "done"
+
+    monkeypatch.setattr(cli_module, "_interactive_output_enabled", lambda _: False)
+
+    assert cli_module._run_with_status(FakeSession(), "task", output_fn=print) == "done"
+    assert calls == ["run"]
+
+
 def test_cli_status_start_failure_cleans_up_and_runs_task_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
