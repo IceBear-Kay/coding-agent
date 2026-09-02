@@ -1,6 +1,6 @@
 # CLI 使用说明
 
-`coding-agent` 带位置任务时执行一次任务；省略位置任务时默认进入连续聊天。聊天会在同一进程内保留正常完成的会话历史。CLI 默认开放 `list_files`、`read_file`、`read_document`、`write_file`、`edit_file` 和 `run_command`，但写入、修改和执行仍需逐次审批；可用 `--no-write`、`--no-exec` 或 `--read-only` 明确关闭对应工具。
+`coding-agent` 带位置任务时执行一次任务；省略位置任务时默认进入连续聊天。聊天会在同一进程内保留并默认持久化正常完成的会话历史。CLI 默认开放 `list_files`、`read_file`、`read_document`、`write_file`、`edit_file` 和 `run_command`，但写入、修改和执行仍需逐次审批；可用 `--no-write`、`--no-exec` 或 `--read-only` 明确关闭对应工具。
 
 ## 直接运行
 
@@ -28,11 +28,11 @@ uv run --env-file .env coding-agent --no-chat --workspace .
 uv run --env-file .env coding-agent --chat --workspace . --max-steps 8
 ```
 
-进入会话后，普通非空文本会启动一个新任务；`/clear` 清空内存历史，`/exit` 正常退出。空输入不调用 Provider，等待任务时收到 EOF 也会正常退出。
+进入会话后，普通非空文本会启动一个新任务；`/sessions` 列出并选择会话，`/rename <标题>` 修改当前会话标题，`/clear` 清空或切换会话，`/exit` 正常退出。空输入不调用 Provider，等待任务时收到 EOF 也会正常退出。聊天默认持久化，使用 `--no-save` 可切换为仅内存模式。
 
 ## 持久聊天会话
 
-使用 `--session ID` 创建持久会话，使用 `--resume ID` 恢复已有会话；两者互斥，且必须处于聊天模式（显式使用 `--chat` 或省略位置任务进入默认聊天）。`--session-dir PATH` 指定 JSON 存档目录，省略时默认为启动目录下的 `.local/sessions`。位置任务不能与持久会话参数同时使用，单独指定 `--session-dir` 会报参数错误。
+使用 `--session ID` 创建持久会话，使用 `--resume ID` 恢复已有会话；两者互斥，且必须处于聊天模式（显式使用 `--chat` 或省略位置任务进入默认聊天）。`--session-dir PATH` 指定 JSON 存档目录，省略时默认为启动目录下的 `.local/sessions`；聊天模式可以单独指定。位置任务不能与持久会话参数同时使用。
 
 ```powershell
 uv run --env-file .env coding-agent --chat --session demo-chat --session-dir .local/sessions --workspace .
@@ -41,19 +41,22 @@ uv run --env-file .env coding-agent --chat --resume demo-chat --session-dir .loc
 
 启动时只显示会话 ID 和存档路径，不展示完整历史。恢复会话只加载已完成的历史，不重放 Provider 请求或历史工具调用；当前启动参数决定本次工具权限、审批行为和资源限制。只有停止原因为 `completed` 的任务才会写入存档，异常停止或中断任务不会提交为可恢复历史。
 
+新持久会话的首条有效任务会触发一次独立的会话标题请求：输入最多 1000 个字符，禁用工具，`max_tokens=256`，超时 5 秒且不重试。请求失败时使用本地备用标题；标题请求不进入主任务历史或 `max_steps`。恢复会话和人工 `/rename` 后不会重复自动命名。
+
 恢复后 CLI 会提示历史工具结果可能过时；继续任务前应重新读取并核验当前文件。
 
 同一会话 ID 在持久会话使用期间由单个进程独占；其他进程会在恢复阶段被拒绝，不会调用模型或工具。正常退出、异常退出和 `Ctrl+C` 会释放本进程持有的锁，来源不明的 `.lock` 文件不会自动删除。
 
-持久模式下输入 `/clear` 会保留旧 JSON 存档，创建新的空会话 ID 并切换；普通聊天的 `/clear` 仍只清空内存历史。存档保存完整消息历史，不保存裁剪后的请求上下文、API Key、环境变量、Provider 配置、审批状态或进程对象。存档目录不允许 Agent 文件工具直接访问，也不支持中断续跑、跨设备同步、数据库和自动迁移。
+持久模式下输入 `/clear` 会保留旧 JSON 存档，创建新的空会话 ID 并切换；使用 `--no-save` 时 `/clear` 只清空内存历史。存档保存完整消息历史，不保存裁剪后的请求上下文、API Key、环境变量、Provider 配置、审批状态或进程对象。存档目录不允许 Agent 文件工具直接访问，也不支持中断续跑、跨设备同步、数据库和自动迁移。
 
 ## 参数速查
 
 - `task`：一次任务的文本；提供后执行一次，省略时默认进入聊天。
 - `--chat` / `--no-chat`：显式开启或关闭连续任务会话；两者互斥，`--chat` 不能与位置任务同时使用。
+- `--no-save`：聊天模式不创建或更新持久会话存档；不能与 `--session`、`--resume` 或 `--session-dir` 同时使用。
 - `--session ID`：创建指定 ID 的持久聊天会话；需处于聊天模式（可省略 `--chat`），不能与位置任务同时使用。
 - `--resume ID`：恢复指定 ID 的持久聊天会话；需处于聊天模式（可省略 `--chat`），不能与位置任务同时使用。
-- `--session-dir PATH`：持久会话 JSON 存档目录；默认是启动目录下 `.local/sessions`，必须与 `--session` 或 `--resume` 一起使用。
+- `--session-dir PATH`：持久会话 JSON 存档目录；默认是启动目录下 `.local/sessions`，聊天模式可以单独指定。
 - `--workspace` / `-w`：工作区目录，默认是当前目录。
 - `--allow-write` / `--no-write`：默认开放或关闭 `write_file` 和 `edit_file`；每个副作用操作仍需单独审批。
 - `--allow-exec` / `--no-exec`：默认开放或关闭 `run_command`；每个命令仍需单独审批。
@@ -144,7 +147,7 @@ uv run --env-file .env coding-agent "请创建 solution.py，读取两个整数�
 
 ## 连续任务会话
 
-`--chat` 使用一份内存中的权威消息历史。每个新任务创建独立的任务状态，因此 Provider 调用次数和临时错误重试预算都会从零开始；模型请求仍能看到此前正常完成任务的 `system`、`user`、`assistant` 和 `tool` 消息，包括原始 `tool_call_id` 与必要的 `reasoning_content`。系统消息不会在每个任务前重复添加。
+`--chat` 使用一份内存中的权威消息历史，并在持久模式下于每个任务完成后保存到 JSON 存档。每个新任务创建独立的任务状态，因此 Provider 调用次数和临时错误重试预算都会从零开始；模型请求仍能看到此前正常完成任务的 `system`、`user`、`assistant` 和 `tool` 消息，包括原始 `tool_call_id` 与必要的 `reasoning_content`。系统消息不会在每个任务前重复添加。
 
 正常完成任务的历史会继续计入 `--max-context-bytes`；默认策略下，如果累积历史或工具结果使下一次请求超限，任务以 `context_limit` 停止；使用 `--context-policy trim` 时，会先移除最早的完整任务，仍超限才停止。已完成的工具结果仍保留在本次状态中。`/clear` 清空内存历史后，后续任务只按新的消息和工具 Schema 检查预算。
 

@@ -100,6 +100,8 @@ def send_chat_completion_request(
     config: ProviderConfig,
     payload: dict[str, Any],
     client: httpx.Client | None = None,
+    *,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Send a chat request and return its raw JSON object."""
     url = f"{str(config.base_url).rstrip('/')}/chat/completions"
@@ -108,7 +110,8 @@ def send_chat_completion_request(
         "Content-Type": "application/json",
     }
     owns_client = client is None
-    request_client = client or httpx.Client(timeout=config.timeout_seconds)
+    request_timeout = config.timeout_seconds if timeout_seconds is None else timeout_seconds
+    request_client = client or httpx.Client(timeout=request_timeout)
 
     try:
         try:
@@ -116,7 +119,7 @@ def send_chat_completion_request(
                 url,
                 headers=headers,
                 json=payload,
-                timeout=config.timeout_seconds,
+                timeout=request_timeout,
             )
         except httpx.TimeoutException as exc:
             raise ProviderNetworkError("Provider request timed out") from exc
@@ -279,6 +282,38 @@ class OpenAICompatibleProvider:
         )
         raw_response = send_chat_completion_request(self.config, payload, self.client)
         return parse_chat_completion_response(raw_response)
+
+    def generate_title(self, task: str) -> ModelResponse:
+        """Generate one short session title with a bounded, tool-free request."""
+        payload = build_chat_completion_payload(
+            self.config,
+            [
+                Message(role="system", content="为用户任务生成简洁、专业、单行的中文会话标题。"),
+                Message(role="user", content=task[:1000]),
+            ],
+            [],
+            max_tokens=256,
+        )
+        payload["thinking"] = {"type": "disabled"}
+        raw_response = send_chat_completion_request(
+            self.config,
+            payload,
+            self.client,
+            timeout_seconds=5.0,
+        )
+        response = parse_chat_completion_response(raw_response)
+        if (
+            response.tool_calls
+            or not response.text
+            or response.finish_reason
+            in {
+                "length",
+                "content_filter",
+                "insufficient_system_resource",
+            }
+        ):
+            raise ProviderResponseError("Provider returned an invalid session title")
+        return response
 
 
 class FakeProvider:

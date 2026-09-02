@@ -92,6 +92,7 @@ from coding_agent.session import (
 from coding_agent.session_store import (
     DEFAULT_MAX_SESSION_BYTES,
     MAX_SESSION_ID_LENGTH,
+    MAX_SESSION_TITLE_LENGTH,
     SESSION_SCHEMA_VERSION,
     SessionArchive,
     SessionConflictError,
@@ -230,6 +231,7 @@ __all__ = [
     "SessionArchive",
     "SessionConflictError",
     "SessionLease",
+    "MAX_SESSION_TITLE_LENGTH",
     "SessionNotFoundError",
     "SessionPathError",
     "SessionSizeError",

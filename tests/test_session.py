@@ -541,6 +541,41 @@ def test_persistent_session_saves_only_completed_tasks(tmp_path: Path) -> None:
     assert Message(role="user", content="second task") not in archive_after_completed.messages
 
 
+def test_new_persistent_session_generates_title_once_without_main_history_pollution(
+    tmp_path: Path,
+) -> None:
+    class TitleProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                [
+                    ModelResponse(text="任务完成", finish_reason="stop"),
+                    ModelResponse(text="再次完成", finish_reason="stop"),
+                ]
+            )
+            self.title_calls: list[str] = []
+
+        def generate_title(self, task: str) -> ModelResponse:
+            self.title_calls.append(task)
+            return ModelResponse(
+                text="读取项目",
+                finish_reason="stop",
+                usage=Usage(input_tokens=1, output_tokens=2, total_tokens=3),
+            )
+
+    store = SessionStore(tmp_path / "sessions")
+    provider = TitleProvider()
+    session = AgentSession.create(AgentLoop(provider, Workspace(tmp_path)), store, "chat_1")
+    result = session.run("请读取项目")
+    assert result.stop_reason == "completed"
+    assert provider.title_calls == ["请读取项目"]
+    assert len(provider.requests) == 1
+    assert all(message.content != "读取项目" for message in provider.requests[0][0])
+    assert store.load("chat_1").title == "读取项目"
+
+    assert session.run("再次检查").stop_reason == "completed"
+    assert provider.title_calls == ["请读取项目"]
+
+
 def test_persistent_session_resume_does_not_replay_history(tmp_path: Path) -> None:
     store = SessionStore(tmp_path / "sessions")
     workspace = Workspace(tmp_path)
