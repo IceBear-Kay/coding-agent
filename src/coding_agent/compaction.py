@@ -214,7 +214,7 @@ def compact_history(
         response.tool_calls
         or not isinstance(response.text, str)
         or not response.text.strip()
-        or response.finish_reason in {"length", "content_filter", "insufficient_system_resource"}
+        or response.finish_reason not in {None, "stop", "completed"}
     ):
         return CompactionResult(
             False,
