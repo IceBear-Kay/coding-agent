@@ -274,7 +274,11 @@ class AgentLoop:
                     state.stats.total_tokens += response.usage.total_tokens
                 self._append_assistant_message(state, response)
 
-                if response.tool_calls and response.text:
+                if (
+                    response.tool_calls
+                    and response.text
+                    and response.finish_reason not in NON_NORMAL_FINISH_REASONS
+                ):
                     self._emit_event(AgentEvent(kind="assistant", assistant_text=response.text))
 
                 if response.finish_reason in NON_NORMAL_FINISH_REASONS:

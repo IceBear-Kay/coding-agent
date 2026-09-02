@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from coding_agent import cli as cli_module
 from coding_agent import session_store as session_store_module
 from coding_agent.agent import DEFAULT_SYSTEM_PROMPT
+from coding_agent.approval import ApprovalRequest
 from coding_agent.cli import build_parser, main
 from coding_agent.context import measure_context_bytes
 from coding_agent.models import Message, ModelResponse, ToolCall, Usage
@@ -665,6 +667,193 @@ def test_cli_help_command_does_not_call_provider(tmp_path: Path) -> None:
     )
     assert any("/sessions" in line and "/rename" in line for line in output)
     assert provider.requests == []
+
+
+def test_cli_sanitizes_display_fallback_text() -> None:
+    calls: list[str] = []
+
+    def failing_output(_: str) -> None:
+        raise RuntimeError("display unavailable")
+
+    import builtins
+
+    original_print = builtins.print
+    builtins.print = lambda text="", *args, **kwargs: calls.append(str(text))
+    try:
+        cli_module._emit_display(failing_output, "safe\x1b[31m text")
+    finally:
+        builtins.print = original_print
+    # The fallback must not write the original terminal escape sequence.
+    assert calls == ["safe[31m text"]
+
+
+def test_cli_stops_active_status_before_approval(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    monkeypatch.setattr(cli_module, "_ACTIVE_STATUS_STOPPER", lambda: events.append("stop"))
+    output: list[str] = []
+
+    approved = cli_module._prompt_for_approval(
+        ApprovalRequest(operation="write_file", preview="preview"),
+        lambda _: events.append("input") or "y",
+        lambda text: events.append("output") or output.append(text),
+    )
+
+    assert approved is True
+    assert events[:2] == ["stop", "output"]
+
+
+def test_cli_status_stops_before_user_input_and_runs_task_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeStatus:
+        def start(self) -> None:
+            events.append("start")
+
+        def stop(self) -> None:
+            events.append("stop")
+
+    class FakeConsole:
+        def status(self, _: str) -> FakeStatus:
+            return FakeStatus()
+
+    monkeypatch.setattr(cli_module, "_interactive_output_enabled", lambda _: True)
+    monkeypatch.setattr("rich.console.Console", FakeConsole)
+
+    class FakeSession:
+        def run(self, _: str) -> str:
+            events.append("run")
+            cli_module._prompt_for_approval(
+                ApprovalRequest(operation="write_file", preview="preview"),
+                lambda _: events.append("input") or "y",
+                lambda _: events.append("output"),
+            )
+            return "done"
+
+    assert cli_module._run_with_status(FakeSession(), "task", output_fn=print) == "done"
+    assert events[0:3] == ["start", "run", "stop"]
+    assert events.index("stop") < events.index("output") < events.index("input")
+
+
+def test_cli_status_start_failure_cleans_up_and_runs_task_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FailingStatus:
+        def start(self) -> None:
+            calls.append("start")
+            raise RuntimeError("status unavailable")
+
+        def stop(self) -> None:
+            calls.append("stop")
+
+    class FakeConsole:
+        def status(self, _: str) -> FailingStatus:
+            return FailingStatus()
+
+    class FakeSession:
+        def run(self, _: str) -> str:
+            calls.append("run")
+            return "done"
+
+    output: list[str] = []
+    monkeypatch.setattr(cli_module, "_interactive_output_enabled", lambda _: True)
+    monkeypatch.setattr("rich.console.Console", FakeConsole)
+    assert cli_module._run_with_status(FakeSession(), "task", output_fn=output.append) == "done"
+    assert calls == ["start", "stop", "run"]
+    assert "批准本次操作？[y/N]: " not in output
+
+
+def test_cli_status_console_initialization_failure_runs_task_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FailingConsole:
+        def __init__(self) -> None:
+            calls.append("console")
+            raise RuntimeError("console unavailable")
+
+    class FakeSession:
+        def run(self, _: str) -> str:
+            calls.append("run")
+            return "done"
+
+    monkeypatch.setattr(cli_module, "_interactive_output_enabled", lambda _: True)
+    monkeypatch.setattr("rich.console.Console", FailingConsole)
+
+    assert cli_module._run_with_status(FakeSession(), "task", output_fn=print) == "done"
+    assert calls == ["console", "run"]
+
+
+def test_cli_status_factory_failure_runs_task_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeConsole:
+        def status(self, _: str) -> object:
+            calls.append("status")
+            raise RuntimeError("status unavailable")
+
+    class FakeSession:
+        def run(self, _: str) -> str:
+            calls.append("run")
+            return "done"
+
+    monkeypatch.setattr(cli_module, "_interactive_output_enabled", lambda _: True)
+    monkeypatch.setattr("rich.console.Console", FakeConsole)
+
+    assert cli_module._run_with_status(FakeSession(), "task", output_fn=print) == "done"
+    assert calls == ["status", "run"]
+
+
+def test_cli_status_start_interrupt_cleans_up_without_running_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class InterruptStatus:
+        def start(self) -> None:
+            calls.append("start")
+            raise KeyboardInterrupt
+
+        def stop(self) -> None:
+            calls.append("stop")
+
+    class FakeConsole:
+        def status(self, _: str) -> InterruptStatus:
+            return InterruptStatus()
+
+    class FakeSession:
+        def run(self, _: str) -> str:
+            calls.append("run")
+            return "done"
+
+    monkeypatch.setattr(cli_module, "_interactive_output_enabled", lambda _: True)
+    monkeypatch.setattr("rich.console.Console", FakeConsole)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli_module._run_with_status(FakeSession(), "task", output_fn=print)
+    assert calls == ["start", "stop"]
+
+
+def test_cli_approval_display_failure_rejects_without_reading_input() -> None:
+    input_calls: list[str] = []
+
+    def fail_output(_: str) -> None:
+        raise RuntimeError("terminal unavailable")
+
+    approved = cli_module._prompt_for_approval(
+        ApprovalRequest(operation="write_file", preview="preview"),
+        lambda prompt: input_calls.append(prompt) or "y",
+        fail_output,
+    )
+
+    assert approved is False
+    assert input_calls == []
 
 
 @pytest.mark.parametrize(
@@ -1345,6 +1534,44 @@ def test_cli_shows_optional_assistant_plan_before_tool_progress(tmp_path: Path) 
     )
     assert all("计划：隐藏" not in line for line in hidden_output)
     assert hidden_output[-2:] == ["已完成。", "停止原因: completed"]
+
+
+@pytest.mark.parametrize(
+    "finish_reason",
+    ["length", "content_filter", "insufficient_system_resource"],
+)
+def test_cli_does_not_duplicate_abnormal_tool_response_text(
+    tmp_path: Path,
+    finish_reason: str,
+) -> None:
+    provider = FakeProvider(
+        [
+            ModelResponse(
+                text="截断前的行动说明",
+                tool_calls=[
+                    ToolCall(
+                        id="call_truncated",
+                        name="read_file",
+                        arguments={"path": "missing.txt"},
+                    )
+                ],
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+    output: list[str] = []
+    errors: list[str] = []
+    assert (
+        main(
+            ["读取", "--workspace", str(tmp_path), "--read-only"],
+            provider=provider,
+            output_fn=output.append,
+            error_fn=errors.append,
+        )
+        == 1
+    )
+    assert output.count("截断前的行动说明") == 1
+    assert errors == [f"停止原因: {finish_reason}"]
 
 
 def test_cli_hiding_tool_events_keeps_approval_and_errors_visible(tmp_path: Path) -> None:

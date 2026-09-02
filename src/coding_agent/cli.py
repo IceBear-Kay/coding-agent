@@ -40,6 +40,7 @@ from coding_agent.session_store import SessionStore, SessionStoreError
 from coding_agent.tools import Workspace
 
 _STRUCTURED_RESULT_TOOLS = frozenset({"write_file", "edit_file", "run_command", "read_document"})
+_ACTIVE_STATUS_STOPPER: Callable[[], Any] | None = None
 
 
 def _positive_int(value: str) -> int:
@@ -398,18 +399,24 @@ def _prompt_for_approval(
     input_fn: Callable[[str], str],
     output_fn: Callable[[str], Any],
 ) -> bool:
-    output_fn(f"待审批操作: {request.operation}\n{request.preview}")
+    _stop_active_status()
+    try:
+        output_fn(_sanitize_terminal_text(f"待审批操作: {request.operation}\n{request.preview}"))
+    except KeyboardInterrupt:
+        raise
+    except Exception:
+        return False
     if input_fn is input and not _stdin_is_interactive():
-        output_fn("审批结果: 已拒绝（非交互输入不能用于审批）")
+        _emit_display(output_fn, "审批结果: 已拒绝（非交互输入不能用于审批）")
         return False
     try:
         answer = input_fn("批准本次操作？[y/N]: ")
     except EOFError:
-        output_fn("审批结果: 已拒绝（无法读取输入）")
+        _emit_display(output_fn, "审批结果: 已拒绝（无法读取输入）")
         return False
 
     approved = answer.strip().casefold() in {"y", "yes"}
-    output_fn("审批结果: 已批准" if approved else "审批结果: 已拒绝")
+    _emit_display(output_fn, "审批结果: 已批准" if approved else "审批结果: 已拒绝")
     return approved
 
 
@@ -444,13 +451,14 @@ def _render_answer(answer: str, output_fn: Callable[[str], Any]) -> None:
 
 def _emit_display(output_fn: Callable[[str], Any], text: str) -> None:
     """Keep ordinary display failures from changing execution semantics."""
+    safe_text = _sanitize_terminal_text(text)
     try:
-        output_fn(_sanitize_terminal_text(text))
+        output_fn(safe_text)
     except KeyboardInterrupt:
         raise
     except Exception:
         with suppress(Exception):
-            print(text)
+            print(safe_text)
 
 
 def _sanitize_terminal_text(text: str) -> str:
@@ -485,21 +493,59 @@ def _run_with_status(
 ) -> AgentRunResult:
     if not _interactive_output_enabled(output_fn):
         return session.run(task)
+
+    # Rich is an optional presentation layer.  Console construction and status
+    # creation can fail in unusual terminals, so neither should prevent the
+    # actual task from running once in the plain execution path.
     try:
         from rich.console import Console
-    except ImportError:
-        return session.run(task)
-    console = Console()
-    status = console.status("模型处理中…")
-    try:
-        status.start()
+
+        console = Console()
+        status = console.status("模型处理中…")
+    except KeyboardInterrupt:
+        raise
     except Exception:
         return session.run(task)
+
+    global _ACTIVE_STATUS_STOPPER
+    previous_stopper = _ACTIVE_STATUS_STOPPER
+    stopped = False
+
+    def stop_status() -> None:
+        nonlocal stopped
+        if stopped:
+            return
+        stopped = True
+        # Cleanup must never replace the task's result or interrupt signal.
+        with suppress(BaseException):
+            status.stop()
+
+    _ACTIVE_STATUS_STOPPER = stop_status
+    try:
+        status.start()
+    except KeyboardInterrupt:
+        stop_status()
+        if _ACTIVE_STATUS_STOPPER is stop_status:
+            _ACTIVE_STATUS_STOPPER = previous_stopper
+        raise
+    except Exception:
+        stop_status()
+        if _ACTIVE_STATUS_STOPPER is stop_status:
+            _ACTIVE_STATUS_STOPPER = previous_stopper
+        return session.run(task)
+
     try:
         return session.run(task)
     finally:
-        with suppress(Exception):
-            status.stop()
+        stop_status()
+        if _ACTIVE_STATUS_STOPPER is stop_status:
+            _ACTIVE_STATUS_STOPPER = previous_stopper
+
+
+def _stop_active_status() -> None:
+    stopper = _ACTIVE_STATUS_STOPPER
+    if stopper is not None:
+        stopper()
 
 
 def _run_chat(
@@ -848,7 +894,11 @@ def main(
             ),
             workspace=workspace,
         )
-        result = _run_with_status(AgentSession(loop), task, output_fn=output_fn)
+        result = _run_with_status(
+            AgentSession(loop),
+            task,
+            output_fn=output_fn,
+        )
         return _report_result(result, output_fn, report_error, show_stats=args.show_stats)
     except KeyboardInterrupt:
         _report_interrupt(report_error)
