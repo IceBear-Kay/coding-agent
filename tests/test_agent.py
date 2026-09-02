@@ -136,7 +136,7 @@ def test_agent_loop_accepts_65536_output_budget_with_v4_window(tmp_path: Path, m
 
 
 def test_agent_loop_rejects_output_budget_that_exhausts_model_window(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="exceed model window"):
+    with pytest.raises(ValueError, match="leaves no model context budget"):
         AgentLoop(
             FakeProvider([]),
             Workspace(tmp_path),

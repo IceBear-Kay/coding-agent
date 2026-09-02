@@ -127,9 +127,10 @@ class AgentLoop:
                 raise TypeError("model_window_tokens must be an integer")
             if model_window_tokens <= 0:
                 raise ValueError("model_window_tokens must be greater than zero")
+            if max_output_tokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS >= model_window_tokens:
+                raise ValueError("max_output_tokens leaves no model context budget")
             if (
-                max_output_tokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS >= model_window_tokens
-                or max_context_tokens + max_output_tokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS
+                max_context_tokens + max_output_tokens + DEFAULT_CONTEXT_SAFETY_MARGIN_TOKENS
                 > model_window_tokens
             ):
                 raise ValueError("configured context and output budgets exceed model window")
